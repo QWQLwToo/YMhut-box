@@ -1,0 +1,134 @@
+{
+  "layout_version": "1.0.6",
+  "last_updated": "2025-09-9T17:45:00Z",
+  "categories": [
+    {
+      "id": "image",
+      "name": "随机图片",
+      "icon": "fas fa-image",
+      "enabled": true,
+      "layout": {
+        "columns": 1,
+        "aspect_ratio": "16:9",
+        "show_preview": true,
+        "transition_effect": "fade"
+      },
+      "subcategories": [
+        {
+          "id": "xjj",
+          "name": "小姐姐",
+          "description": "精选小姐姐图片",
+          "api_url": "https://xjj.ymhut.bid/xjj",
+          "thumbnail_url": "https://pic2.zhimg.com/v2-379be37e0b4d372aa60046f9ce771f12_r.jpg",
+          "supported_formats": ["jpg", "jpeg", "png", "webp"],
+          "refresh_interval": 30,
+          "downloadable": true
+        },
+        {
+          "id": "baisi",
+          "name": "白丝",
+          "description": "随机白丝图片",
+          "api_url": "https://api.ppqa.cn/api/baisi",
+          "thumbnail_url": "https://n.sinaimg.cn/sinacn10112/760/w640h920/20200126/4b00-innckcf8208822.jpg",
+          "supported_formats": ["jpg", "jpeg", "png", "webp"],
+          "refresh_interval": 30,
+          "downloadable": true
+        },
+        {
+          "id": "heisi",
+          "name": "黑丝",
+          "description": "随机黑丝图片",
+          "api_url": "https://v2.xxapi.cn/api/heisi?return=302",
+          "thumbnail_url": "https://img-baofun.zhhainiao.com/pcwallpaper_ugc_mobile/static/6902725194a8c081767ee82373d3b017.jpeg",
+          "supported_formats": ["jpg", "jpeg", "png", "webp"],
+          "refresh_interval": 30,
+          "downloadable": true
+        },
+        {
+          "id": "acg",
+          "name": "二次元(4K)",
+          "description": "二次元类图（包含动漫、漫画、游戏）",
+          "api_url": "https://v2.xxapi.cn/api/random4kPic?type=acg&return=302",
+          "thumbnail_url": "https://www.sgpjbg.com/FileUpload/News/c358f121-6683-490b-beed-6debb44e4824.jpg",
+          "supported_formats": ["jpg", "jpeg", "png", "webp"],
+          "refresh_interval": 30,
+          "downloadable": true
+        },
+        {
+          "id": "miku",
+          "name": "初音未来",
+          "description": "miku的随机图",
+          "api_url": "https://apii.ctose.cn/api/cy/api/",
+          "thumbnail_url": "https://apii.ctose.cn/api/cy/api/",
+          "supported_formats": ["jpg", "jpeg", "png", "webp"],
+          "refresh_interval": 30,
+          "downloadable": true
+        },
+        {
+          "id": "猫羽雫",
+          "name": "猫羽雫",
+          "description": "猫羽雫的随机图",
+          "api_url": "https://api.suyanw.cn/api/mao.php",
+          "thumbnail_url": "https://api.suyanw.cn/api/mao.php",
+          "supported_formats": ["jpg", "jpeg", "png", "webp"],
+          "refresh_interval": 30,
+          "downloadable": true
+        },
+        {
+          "id": "wappller",
+          "name": "高清壁纸",
+          "description": "随机高清壁纸",
+          "api_url": "https://api.suyanw.cn/api/scenery.php",
+          "thumbnail_url": "https://api.suyanw.cn/api/scenery.php",
+          "supported_formats": ["jpg", "jpeg", "png", "webp"],
+          "refresh_interval": 30,
+          "downloadable": true
+        }
+      ]
+    },
+    {
+      "id": "video",
+      "name": "随机视频",
+      "icon": "fas fa-video",
+      "enabled": true,
+      "layout": {
+        "columns": 1,
+        "aspect_ratio": "16:9",
+        "show_preview": true,
+        "auto_play": false,
+        "transition_effect": "slide"
+      },
+      "subcategories": [
+        {
+          "id": "radom_xjj_leixing",
+          "name": "小姐姐不同风格视频",
+          "description": "随机风格类型视频",
+          "api_url": "https://v2.xxapi.cn/api/meinv?return=302",
+          "thumbnail_url": "https://n.sinaimg.cn/sinacn19/176/w888h888/20181119/0c26-hmhhnqt1050818.jpg",
+          "supported_formats": ["mp4", "webm"],
+          "refresh_interval": 60,
+          "downloadable": true
+        },
+        {
+          "id": "radom_xjj_short",
+          "name": "短视频",
+          "description": "随机风格小姐姐的视频",
+          "api_url": "https://api.dwo.cc/api/v",
+          "thumbnail_url": "https://weather-real.oss-cn-shanghai.aliyuncs.com/weather/2025-06-17/1750091559255t7FNOX.jpg",
+          "supported_formats": ["mp4", "webm"],
+          "refresh_interval": 60,
+          "downloadable": true
+        }
+      ]
+    }
+  ],
+  "ui_config": {
+    "dark_mode": false,
+    "show_thumbnails": false,
+    "default_view": "grid",
+    "animations": {
+      "transition_effect": "fade",
+      "duration": 300
+    }
+  }
+}
