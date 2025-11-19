@@ -11,6 +11,8 @@ const AppDatabase = require('./config/database');
 const si = require('systeminformation');
 const sudo = require('sudo-prompt');
 const ini = require('ini');
+// [修复 2] 引入 Worker 线程支持
+const { Worker } = require('worker_threads');
 
 // --- 国际化(i18n)配置 ---
 // 默认中文语言包 (后备)
@@ -571,7 +573,8 @@ async function loadRemoteConfigs() {
     // 定义不需要网络的工具 ID (白名单)
     const offlineCapableTools = [
         'system-tool', 'system-info', 'base64-converter', 
-        'qr-code-generator', 'chinese-converter', 'profanity-check'
+        'qr-code-generator', 'chinese-converter', 'profanity-check',
+        'image-processor', 'archive-tool'
     ];
 
     const fetchAndCache = (key, url) => new Promise((resolve, reject) => {
@@ -1093,6 +1096,54 @@ ipcMain.handle('get-realtime-stats', () => {
         console.error("获取实时状态失败 (非致命):", error);
         return { cpu: '0.00', uptime: '00:00:00' };
     }
+});
+
+// [修复 2] 压缩/解压 IPC 处理逻辑 (适配 Worker)
+const compressionWorkerPath = path.join(__dirname, 'src/js/workers/compressionWorker.js');
+
+ipcMain.handle('compress-files', (event, data) => {
+    return new Promise((resolve, reject) => {
+        dialog.showSaveDialog(mainWindow, {
+            title: '保存压缩包',
+            defaultPath: `archive_${Date.now()}.${data.format || 'zip'}`,
+            filters: [{ name: 'Archive', extensions: [data.format || 'zip'] }]
+        }).then(result => {
+            if (result.canceled || !result.filePath) {
+                return resolve({ success: false, error: '用户取消操作' });
+            }
+            const worker = new Worker(compressionWorkerPath);
+            worker.on('message', (msg) => {
+                if (msg.status === 'progress') mainWindow.webContents.send('archive-progress', msg);
+                else if (msg.status === 'log') mainWindow.webContents.send('archive-log', msg.message);
+                else if (msg.status === 'complete') { resolve({ success: true, path: msg.path }); worker.terminate(); }
+                else if (msg.status === 'error') { resolve({ success: false, error: msg.error }); worker.terminate(); }
+            });
+            worker.on('error', (err) => { resolve({ success: false, error: err.message }); worker.terminate(); });
+            worker.postMessage({ type: 'compress', data: { ...data, output: result.filePath } });
+        });
+    });
+});
+
+ipcMain.handle('decompress-file', (event, data) => {
+    return new Promise((resolve, reject) => {
+        dialog.showOpenDialog(mainWindow, {
+            title: '选择解压目标文件夹',
+            properties: ['openDirectory']
+        }).then(result => {
+            if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+                return resolve({ success: false, error: '用户取消操作' });
+            }
+            const worker = new Worker(compressionWorkerPath);
+            worker.on('message', (msg) => {
+                if (msg.status === 'progress') mainWindow.webContents.send('archive-progress', msg);
+                else if (msg.status === 'log') mainWindow.webContents.send('archive-log', msg.message);
+                else if (msg.status === 'complete') { shell.openPath(msg.path); resolve({ success: true, path: msg.path }); worker.terminate(); }
+                else if (msg.status === 'error') { resolve({ success: false, error: msg.error }); worker.terminate(); }
+            });
+            worker.on('error', (err) => { resolve({ success: false, error: err.message }); worker.terminate(); });
+            worker.postMessage({ type: 'decompress', data: { ...data, targetDir: result.filePaths[0] } });
+        });
+    });
 });
 
 function createAcknowledgementsWindow(theme, versions) {

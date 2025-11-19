@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>安全浏览器</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <link rel="stylesheet" href="../css/style.css">
+    <style>
+        html, body, #app-body {
+            margin: 0; padding: 0; height: 100%; overflow: hidden; background-color: transparent;
+        }
+        #app-wrapper {
+            display: flex; flex-direction: column; flex: 1; height: 100vh; border-radius: 12px; overflow: hidden; background-color: rgba(var(--bg-color-rgb), 0.95); /* 给窗口一个底色 */
+        }
+        .title-bar-shell {
+            height: 35px; /* 减少高度 */ display: flex; justify-content: space-between; align-items: center; padding: 0 5px 0 10px; -webkit-app-region: drag; color: var(--text-secondary); border-bottom: 1px solid var(--border-color); flex-shrink: 0;
+        }
+        .title-bar-shell .window-controls { height: 100%; } /* 确保按钮垂直居中 */
+
+        /* --- 多标签页样式 --- */
+        #tab-bar {
+            display: flex; align-items: center; height: 40px; background-color: rgba(var(--card-background-rgb), 0.6); padding: 0 5px; flex-shrink: 0; overflow-x: auto; /* 允许标签栏横向滚动 */ -webkit-app-region: drag; /* 标签栏区域也可拖动 */
+        }
+        #tab-bar::-webkit-scrollbar { height: 3px; }
+        #tab-bar::-webkit-scrollbar-thumb { background-color: var(--border-color); border-radius: 1.5px; }
+
+        .tab {
+            display: flex; align-items: center; padding: 0 10px; height: 32px; border-radius: 8px; margin-right: 5px; background-color: transparent; border: 1px solid transparent; cursor: pointer; flex-shrink: 0; max-width: 180px; /* 限制标签最大宽度 */ -webkit-app-region: no-drag; /* 标签本身不可拖动 */ transition: background-color 0.2s ease, border-color 0.2s ease;
+        }
+        .tab:hover { background-color: rgba(var(--card-background-rgb), 0.8); }
+        .tab.active { background-color: rgba(var(--card-background-rgb), 1); border-color: var(--border-color); }
+
+        .tab-icon { width: 16px; height: 16px; margin-right: 8px; object-fit: contain; flex-shrink: 0; /* 防止图标被压缩 */ }
+        .tab-title { font-size: 13px; color: var(--text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-grow: 1; }
+        .tab-close-btn { margin-left: 8px; font-size: 12px; color: var(--text-secondary); border: none; background: none; cursor: pointer; padding: 4px; border-radius: 4px; line-height: 1; flex-shrink: 0; /* 防止关闭按钮被压缩 */ }
+        .tab-close-btn:hover { background-color: var(--border-color); color: var(--error-color); }
+        #add-tab-btn { font-size: 16px; color: var(--text-secondary); border: none; background: none; cursor: pointer; padding: 5px 8px; border-radius: 4px; margin-left: 5px; -webkit-app-region: no-drag; }
+        #add-tab-btn:hover { background-color: var(--border-color); color: var(--primary-color); }
+        /* --- 结束：多标签页样式 --- */
+
+        #loading-progress { /* 移动加载条到导航栏 */
+             position: absolute; top: 0; left: 0; width: 100%; height: 3px; appearance: none; border: none; background: none; display: none;
+        }
+        #loading-progress::-webkit-progress-bar { background: none; }
+        #loading-progress::-webkit-progress-value { background-color: var(--primary-color); transition: width 0.1s linear; }
+
+        #view-controls { /* 导航栏 */
+            position: relative; /* 为加载条定位 */ display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border-color); flex-shrink: 0; background-color: rgba(var(--bg-color-rgb), 0.8);
+        }
+        #address-bar { /* 地址栏 */
+            flex-grow: 1; padding: 5px 10px; font-size: 13px; border: 1px solid var(--border-color); border-radius: 6px; background-color: rgba(var(--card-background-rgb), 0.7); color: var(--text-color);
+        }
+        #address-bar:focus { outline: none; border-color: var(--primary-color); box-shadow: 0 0 0 1px rgba(var(--primary-rgb), 0.3); }
+
+        #webview-container { flex: 1; min-height: 0; overflow: hidden; background-color: #ffffff; }
+        webview { width: 100%; height: 100%; border: none; display: none; /* 默认隐藏 */ }
+        webview.active { display: inline-flex !important; /* 激活的显示 */ }
+    </style>
+</head>
+<body id="app-body" class="browser-window-body">
+    <div id="app-wrapper">
+        <div class="title-bar-shell">
+            <span id="window-title" style="margin-left: 12px; font-weight: 600; -webkit-app-region: drag; flex-grow: 1;">安全浏览器</span>
+            <div class="window-controls">
+                 <button id="minimize-btn" class="window-control-btn mini-btn" title="最小化"><i class="fas fa-window-minimize"></i></button>
+                 <button id="maximize-btn" class="window-control-btn mini-btn" title="最大化/还原"><i class="far fa-square"></i></button>
+                 <button id="close-btn" class="window-control-btn mini-btn" title="关闭"><i class="fas fa-times"></i></button>
+            </div>
+        </div>
+
+        <div id="tab-bar">
+            <button id="add-tab-btn" title="新建标签页"><i class="fas fa-plus"></i></button>
+        </div>
+
+        <div id="view-controls">
+            <progress id="loading-progress" value="0" max="100"></progress>
+            <button id="back-btn" class="control-btn mini-btn ripple" title="后退" disabled><i class="fas fa-arrow-left"></i></button>
+            <button id="forward-btn" class="control-btn mini-btn ripple" title="前进" disabled><i class="fas fa-arrow-right"></i></button>
+            <button id="reload-btn" class="control-btn mini-btn ripple" title="刷新"><i class="fas fa-sync-alt"></i></button>
+            <button id="home-btn" class="control-btn mini-btn ripple" title="主页"><i class="fas fa-home"></i></button>
+            <input type="text" id="address-bar" placeholder="输入 URL 或搜索内容">
+        </div>
+
+        <div id="webview-container">
+            </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const params = new URLSearchParams(window.location.search);
+            const theme = params.get('theme') || 'dark';
+            const initialToolId = params.get('tool'); // 'archive' or 'secure-browser' etc.
+            document.body.setAttribute('data-theme', theme);
+
+            // --- 默认 URL 定义 (使用 Bing) ---
+            const HOME_URL = 'https://www.bing.com';
+            const ARCHIVE_URL = 'https://archive.cdtsf.com';
+            const initialURL = (initialToolId === 'archive') ? ARCHIVE_URL : HOME_URL;
+
+            // --- DOM 元素 ---
+            const tabBar = document.getElementById('tab-bar');
+            const addTabBtn = document.getElementById('add-tab-btn');
+            const webviewContainer = document.getElementById('webview-container');
+            const backBtn = document.getElementById('back-btn');
+            const forwardBtn = document.getElementById('forward-btn');
+            const reloadBtn = document.getElementById('reload-btn');
+            const homeBtn = document.getElementById('home-btn');
+            const addressBar = document.getElementById('address-bar');
+            const loadingBar = document.getElementById('loading-progress');
+
+            let tabs = [];
+            let activeTabId = null;
+            let tabCounter = 0;
+
+            // --- 核心函数 ---
+
+            // 创建新标签页
+            function createTab(urlToLoad = HOME_URL, activate = true) {
+                tabCounter++;
+                const tabId = `tab-${tabCounter}`;
+
+                // 1. 创建 Tab UI
+                const tabElement = document.createElement('div');
+                tabElement.className = 'tab';
+                tabElement.dataset.tabId = tabId;
+                tabElement.innerHTML = `
+                    <img class="tab-icon" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" alt=""> <span class="tab-title">新标签页</span> <button class="tab-close-btn"><i class="fas fa-times"></i></button>
+                `;
+                tabBar.insertBefore(tabElement, addTabBtn);
+
+                // 2. 创建 Webview
+                const webviewElement = document.createElement('webview');
+                webviewElement.dataset.tabId = tabId;
+                webviewElement.setAttribute('allowpopups', ''); // 允许弹出窗口 (可选)
+                webviewElement.setAttribute('src', urlToLoad); // 使用 src 加载初始 URL
+
+                // 3. 存储 Tab 信息
+                const newTab = {
+                    id: tabId,
+                    element: tabElement,
+                    webview: webviewElement,
+                    title: '新标签页',
+                    url: urlToLoad,
+                    isLoading: true,
+                    canGoBack: false,
+                    canGoForward: false,
+                    favicon: null
+                };
+                tabs.push(newTab);
+
+                // 4. 绑定 Tab UI 事件
+                tabElement.addEventListener('click', () => switchTab(tabId));
+                tabElement.querySelector('.tab-close-btn').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    closeTab(tabId);
+                });
+
+                // 5. 附加 Webview 到 DOM
+                webviewContainer.appendChild(webviewElement);
+
+                // 6. 附加 Webview 的事件监听器
+                attachWebviewListeners(newTab);
+
+                if (activate) {
+                    switchTab(tabId);
+                }
+                return newTab;
+            }
+
+            // 切换标签页
+            function switchTab(tabId) {
+                if (activeTabId === tabId) return;
+
+                const previousActiveTab = tabs.find(t => t.id === activeTabId);
+                // ... (暂停/恢复逻辑可以保留) ...
+
+                activeTabId = tabId;
+                tabs.forEach(tab => {
+                    const isActive = tab.id === tabId;
+                    tab.element.classList.toggle('active', isActive);
+                    if (tab.webview) { // 检查 webview 是否存在
+                        tab.webview.classList.toggle('active', isActive);
+                    }
+                    if (isActive) {
+                        updateControlsForTab(tab);
+                    }
+                });
+                 // 将激活的 tab 滚动到视图中
+                 const activeTabElement = document.querySelector(`.tab[data-tab-id="${tabId}"]`);
+                 if(activeTabElement) {
+                     activeTabElement.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+                 }
+            }
+
+            // 关闭标签页
+            function closeTab(tabId) {
+                const tabIndex = tabs.findIndex(tab => tab.id === tabId);
+                if (tabIndex === -1) return;
+
+                const tabToClose = tabs[tabIndex];
+                tabToClose.element.remove();
+                if (tabToClose.webview) {
+                    try {
+                         if (tabToClose.webview && typeof tabToClose.webview.stop === 'function') {
+                             tabToClose.webview.stop();
+                         }
+                    } catch (e) { console.warn("Error stopping webview before removal:", e.message); }
+                    tabToClose.webview.remove();
+                }
+                tabs.splice(tabIndex, 1);
+
+                if (activeTabId === tabId) {
+                    activeTabId = null;
+                    const nextActiveIndex = Math.max(0, tabIndex - 1);
+                    if (tabs.length > 0) {
+                        switchTab(tabs[nextActiveIndex].id);
+                    } else {
+                        createTab(HOME_URL, true); // 改为新建标签页
+                    }
+                }
+            }
+
+            // 为 Webview 附加事件监听器
+            function attachWebviewListeners(tab) {
+                const webview = tab.webview;
+
+                // 捕获进程启动相关的错误
+                webview.addEventListener('did-start-loading', () => {
+                    tab.isLoading = true;
+                    updateTabTitle(tab, '正在加载...'); // Use helper
+                    tab.element.querySelector('.tab-icon').src = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+                    if (tab.id === activeTabId) {
+                        loadingBar.style.display = 'block';
+                        loadingBar.value = 10; // Start progress
+                        reloadBtn.innerHTML = '<i class="fas fa-times"></i>';
+                    }
+                });
+
+                webview.addEventListener('did-stop-loading', () => {
+                    tab.isLoading = false;
+                    // **重要**: 在 stop-loading 时更新导航状态最可靠
+                    tab.canGoBack = webview.canGoBack();
+                    tab.canGoForward = webview.canGoForward();
+
+                    if (tab.id === activeTabId) {
+                        loadingBar.style.display = 'none';
+                        loadingBar.value = 100;
+                        reloadBtn.innerHTML = '<i class="fas fa-sync-alt"></i>';
+                        updateControlsForTab(tab); // Update address bar and buttons
+                    }
+                     // 更新标题 (如果仍然是"正在加载...")
+                     const currentTitle = tab.element.querySelector('.tab-title').textContent;
+                     if (currentTitle === '正在加载...' || currentTitle === '新标签页') {
+                         const pageTitle = webview.getTitle(); // 获取实际标题
+                         updateTabTitle(tab, pageTitle || tab.url || '加载完成'); // Use helper with fallback
+                     }
+                });
+
+                webview.addEventListener('did-fail-load', (e) => {
+                     if (e.errorCode === -3 /* ABORTED */ ) return; // Ignore deliberate stops
+                     console.error(`Tab ${tab.id} did-fail-load:`, e.validatedURL, e.errorCode, e.errorDescription);
+                     handleWebviewCrash(tab, `加载失败 (${e.errorCode})`);
+                 });
+
+                 webview.addEventListener('dom-ready', () => {
+                     if (theme === 'dark') {
+                         tryInjectDarkModeCSS(webview);
+                     }
+                     // 更新导航状态 (作为备用)
+                     try { // Add try-catch as canGoBack/Forward might fail if webview crashed before dom-ready
+                        tab.canGoBack = webview.canGoBack();
+                        tab.canGoForward = webview.canGoForward();
+                        if (tab.id === activeTabId) updateNavButtonsState(tab);
+                     } catch (err) {
+                        console.warn(`Error updating nav state on dom-ready for ${tab.id}:`, err.message);
+                     }
+                 });
+
+                webview.addEventListener('did-navigate', (e) => {
+                    tab.url = e.url;
+                    // did-stop-loading 会处理按钮状态
+                    if (tab.id === activeTabId) addressBar.value = tab.url;
+                });
+
+                webview.addEventListener('did-navigate-in-page', (e) => {
+                    tab.url = e.url;
+                    if (tab.id === activeTabId) addressBar.value = tab.url;
+                     // 页内导航后也可能需要更新前进后退状态
+                     try { // Add try-catch
+                        tab.canGoBack = webview.canGoBack();
+                        tab.canGoForward = webview.canGoForward();
+                        if (tab.id === activeTabId) updateNavButtonsState(tab);
+                     } catch (err) {
+                         console.warn(`Error updating nav state on navigate-in-page for ${tab.id}:`, err.message);
+                     }
+                });
+
+                webview.addEventListener('page-title-updated', (e) => {
+                    updateTabTitle(tab, e.title); // Use helper
+                });
+
+                webview.addEventListener('page-favicon-updated', (e) => {
+                     if (e.favicons && e.favicons.length > 0) {
+                         const bestIcon = e.favicons.sort((a,b) => {
+                             const sizeA = parseInt(a.match(/(\d+)x\d+/)?.[1] || '0');
+                             const sizeB = parseInt(b.match(/(\d+)x\d+/)?.[1] || '0');
+                             return sizeB - sizeA;
+                         })[0] || e.favicons[0];
+                         tab.favicon = bestIcon;
+                         tab.element.querySelector('.tab-icon').src = tab.favicon;
+                     }
+                 });
+
+                 // 处理新窗口请求 (在浏览器内部打开新标签页)
+                webview.addEventListener('new-window', (e) => {
+                     e.preventDefault();
+                     console.log("New window requested:", e.url, "Disposition:", e.disposition);
+
+                     if (e.disposition === 'new-window' || e.disposition === 'foreground-tab') {
+                         createTab(e.url, true); // 在前台新标签页中打开
+                     } else if (e.disposition === 'background-tab') {
+                         createTab(e.url, false); // 在后台新标签页中打开
+                     } else {
+                          console.warn("Unhandled new-window disposition:", e.disposition, e.url);
+                          // 默认在当前标签页加载
+                          performWebviewAction(wv => wv.loadURL(e.url));
+                     }
+                 });
+
+                // --- 崩溃处理 ---
+                const crashHandler = (reason) => () => handleWebviewCrash(tab, reason);
+                webview.addEventListener('crashed', crashHandler('页面崩溃'));
+                webview.addEventListener('gpu-crashed', crashHandler('GPU 进程崩溃'));
+                webview.addEventListener('plugin-crashed', crashHandler('插件崩溃'));
+                webview.addEventListener('destroyed', () => {
+                    console.log(`Webview ${tab.id} destroyed.`);
+                    const existingTab = tabs.find(t => t.id === tab.id);
+                    if (existingTab) {
+                        existingTab.webview = null;
+                        if (tab.id === activeTabId) {
+                            updateControlsForTab(null);
+                        }
+                    }
+                });
+            }
+
+            // 更新 Tab 标题的辅助函数
+            function updateTabTitle(tab, newTitle) {
+                const displayTitle = (typeof newTitle === 'string' && newTitle.trim()) ? newTitle.trim() : (tab.url || '无标题');
+                tab.title = displayTitle;
+                const titleElement = tab.element.querySelector('.tab-title');
+                if (titleElement) titleElement.textContent = displayTitle;
+                
+                // 同时更新窗口标题栏
+                if (tab.id === activeTabId) {
+                    document.title = displayTitle;
+                    document.getElementById('window-title').textContent = displayTitle; // 更新标题栏
+                }
+            }
+
+            // 更新导航控件状态
+            function updateControlsForTab(tab) {
+                if (!tab) { // Handle case where active tab might be gone or webview destroyed
+                    addressBar.value = '';
+                    document.title = '安全浏览器';
+                    document.getElementById('window-title').textContent = '安全浏览器'; // 重置标题栏
+                    backBtn.disabled = true;
+                    forwardBtn.disabled = true;
+                    reloadBtn.innerHTML = '<i class="fas fa-sync-alt"></i>';
+                    loadingBar.style.display = 'none';
+                    return;
+                }
+                addressBar.value = tab.url || '';
+                document.title = tab.title || '浏览器';
+                document.getElementById('window-title').textContent = tab.title || '浏览器'; // 更新标题栏
+                updateNavButtonsState(tab);
+
+                if (tab.webview && tab.isLoading) {
+                    loadingBar.style.display = 'block';
+                    reloadBtn.innerHTML = '<i class="fas fa-times"></i>'; // Stop button
+                } else {
+                    loadingBar.style.display = 'none';
+                    reloadBtn.innerHTML = '<i class="fas fa-sync-alt"></i>'; // Refresh button
+                }
+            }
+
+            // 更新前进/后退按钮状态
+             function updateNavButtonsState(tab) {
+                 backBtn.disabled = !tab || !tab.webview || !tab.canGoBack;
+                 forwardBtn.disabled = !tab || !tab.webview || !tab.canGoForward;
+             }
+
+            // 处理 Webview 崩溃
+            function handleWebviewCrash(tab, reason = '未知错误') {
+                 console.error(`Tab ${tab.id} webview crashed or failed: ${reason}`);
+                 tab.isLoading = false;
+                 updateTabTitle(tab, `⚠ ${reason}`);
+                 tab.element.querySelector('.tab-icon').src = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+                 tab.webview = null; 
+                 if (tab.id === activeTabId) {
+                      updateControlsForTab(tab);
+                 }
+                 tab.element.style.opacity = '0.7';
+                 tab.element.style.borderLeft = '3px solid var(--error-color)';
+             }
+
+             // 尝试注入暗黑模式 CSS
+             function tryInjectDarkModeCSS(webview) {
+                 if (!webview || typeof webview.insertCSS !== 'function') return;
+                 const darkModeCSS = `
+                    html { filter: invert(1) hue-rotate(180deg); background-color: #1a1a1a !important; }
+                    img, video, iframe, canvas, svg, [style*="background-image"], input[type="image"] { filter: invert(1) hue-rotate(180deg); }
+                 `;
+                 try {
+                     webview.insertCSS(darkModeCSS).catch(err => console.warn("Failed to insert CSS:", err.message));
+                 } catch (error) {
+                      // console.warn('Failed to inject dark mode CSS:', error.message);
+                 }
+             }
+
+            // --- 事件绑定 ---
+
+            // 添加新标签页按钮
+            addTabBtn.addEventListener('click', () => createTab(HOME_URL, true));
+
+            // --- 统一导航/操作函数 ---
+            function performWebviewAction(action) {
+                const activeTab = tabs.find(tab => tab.id === activeTabId);
+                if (activeTab && activeTab.webview) {
+                    try {
+                        action(activeTab.webview);
+                    } catch (error) {
+                        console.error(`Error performing action on webview ${activeTab.id}:`, error.message);
+                        handleWebviewCrash(activeTab, `操作失败: ${error.message}`);
+                    }
+                } else if (activeTab && !activeTab.webview) {
+                    console.warn(`Action ignored: Webview for active tab ${activeTab.id} is already destroyed or invalid.`);
+                    handleWebviewCrash(activeTab, "页面已失效");
+                }
+            }
+
+            // 导航按钮
+            backBtn.addEventListener('click', () => performWebviewAction(wv => { if (!backBtn.disabled) wv.goBack(); }));
+            forwardBtn.addEventListener('click', () => performWebviewAction(wv => { if (!forwardBtn.disabled) wv.goForward(); }));
+            reloadBtn.addEventListener('click', () => performWebviewAction(wv => {
+                if (wv.isLoading) wv.stop();
+                else wv.reload();
+            }));
+            homeBtn.addEventListener('click', () => performWebviewAction(wv => wv.loadURL(HOME_URL)));
+
+            // 地址栏
+            addressBar.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    let url = addressBar.value.trim();
+                    if (!url) return;
+                    if (!/^(https?|file):\/\//i.test(url)) {
+                         if (url.includes('.') || url === 'localhost' || /^\d{1,3}(\.\d{1.3}){3}$/.test(url)) {
+                             url = 'https://' + url;
+                         } else {
+                             // 使用 Bing 搜索
+                             url = `https://www.bing.com/search?q=${encodeURIComponent(url)}`;
+                         }
+                    }
+                    performWebviewAction(wv => wv.loadURL(url));
+                }
+            });
+
+             // --- 窗口控制 ---
+             document.getElementById('close-btn').addEventListener('click', () => window.electronAPI.closeCurrentWindow());
+             document.getElementById('minimize-btn').addEventListener('click', () => window.electronAPI.secretWindowMinimize());
+             document.getElementById('maximize-btn').addEventListener('click', () => window.electronAPI.secretWindowMaximize());
+
+            // --- 窗口焦点追踪 ---
+            window.addEventListener('focus', () => document.body.classList.add('window-focused'));
+            window.addEventListener('blur', () => document.body.classList.remove('window-focused'));
+            document.body.classList.add('window-focused'); // 默认激活
+
+            // --- 初始加载 ---
+            createTab(initialURL, true); // 创建第一个标签页
+
+        }); // End of DOMContentLoaded
+    </script>
+</body>
+</html>

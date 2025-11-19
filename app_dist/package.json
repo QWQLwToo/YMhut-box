@@ -1,0 +1,14 @@
+{
+  "name": "ymhut-box",
+  "version": "1.4.13",
+  "description": "A multi-functional toolbox developed by YMHUT",
+  "main": "main.js",
+  "author": "YMHUT",
+  "dependencies": {
+    "better-sqlite3": "9.4.5",
+    "iconv-lite": "^0.6.3",
+    "ini": "^4.0.0",
+    "sudo-prompt": "^9.2.1",
+    "systeminformation": "^5.22.11"
+  }
+}

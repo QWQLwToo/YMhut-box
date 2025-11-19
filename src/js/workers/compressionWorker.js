@@ -1,4 +1,3 @@
-
 // src/js/workers/compressionWorker.js
 const { parentPort } = require('worker_threads');
 const fs = require('fs');
