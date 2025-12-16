@@ -20,6 +20,9 @@ import AITranslationTool from './tools/aiTranslationTool.js';
 // [修复 1] 导入缺失的工具类
 import ImageProcessorTool from './tools/imageProcessorTool.js';
 import ArchiveTool from './tools/archiveTool.js';
+import MediaPlayerTool from './tools/mediaPlayerTool.js';
+import PcBenchmarkTool from './tools/pcBenchmarkTool.js';
+import WeatherDetailsTool from './tools/weatherDetailsTool.js';
 
 /**
  * 将工具ID映射到它们的类定义
@@ -44,5 +47,8 @@ export const toolRegistry = {
     'ai-translation': AITranslationTool,
     // [修复 1] 注册工具
     'image-processor': ImageProcessorTool,
-    'archive-tool': ArchiveTool
+    'archive-tool': ArchiveTool,
+    'media-player': MediaPlayerTool,
+    'pc-benchmark': PcBenchmarkTool,
+    'weather-details': WeatherDetailsTool
 };

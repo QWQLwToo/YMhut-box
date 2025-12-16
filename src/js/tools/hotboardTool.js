@@ -245,14 +245,14 @@ class HotboardTool extends BaseTool {
         const tableRows = data.list.map(item => {
             const rank = item.index;
             const title = item.title;
-            const searchUrl = item.url;
+            // [安全修复] 确保 URL 是字符串
+            let searchUrl = item.url || ''; 
             const hotValue = item.hot_value ? parseFloat(item.hot_value) : 0;
             
-            // 格式化热度值
             let formattedHotValue = hotValue;
-            if (hotValue > 1000000) { // 大于 100 万
+            if (hotValue > 1000000) {
                 formattedHotValue = (hotValue / 10000).toFixed(1) + 'w';
-            } else if (hotValue > 1000) { // 大于 1000
+            } else if (hotValue > 1000) {
                 formattedHotValue = (hotValue / 1000).toFixed(1) + 'k';
             }
 
@@ -261,23 +261,22 @@ class HotboardTool extends BaseTool {
                 rankClass = `rank-top-3 rank-${rank}`;
             }
 
-            // 处理 extra 标签 (如 '新', '爆')
             let extraTag = '';
             let tagText = item.extra?.tag || (typeof item.extra === 'string' ? item.extra : null);
             if (tagText) {
-                 // API 返回的标签可能包含“热”、“新”等，样式化
                  const tagClass = (tagText === '爆' || tagText === '热') ? 'hotboard-tag tag-hot' : 'hotboard-tag tag-new';
                  extraTag = `<span class="${tagClass}">${tagText}</span>`;
             }
 
-            // [UI 重构] 使用新的三栏布局
+            // [重要] 将 URL 放在行元素 data-link 上，方便整行点击
+            // [UI] 移除 a 标签，改用 span，防止样式冲突，由 JS 统一处理跳转
             return `
-                <tr>
+                <tr data-link="${searchUrl}">
                     <td style="width: 50px; text-align: center;">
-                        <span class="bili-hot-rank ${rankClass}">${rank}</span>
+                        <span class="hotboard-rank ${rankClass}">${rank}</span>
                     </td>
                     <td>
-                        <a href="#" data-link="${searchUrl}" class="hotboard-title-link">${title}</a>
+                        <span class="hotboard-title-link">${title}</span>
                         ${extraTag}
                     </td>
                     <td style="width: 100px; text-align: right;">
@@ -287,7 +286,6 @@ class HotboardTool extends BaseTool {
             `;
         }).join('');
 
-        // [UI 重构] 使用 ip-comparison-table 样式（带边框），并添加 thead
         this.dom.resultsContainer.innerHTML = `
             <table class="ip-comparison-table hotboard-table" style="animation: contentFadeIn 0.5s;">
                 <thead>
@@ -302,10 +300,19 @@ class HotboardTool extends BaseTool {
                 </tbody>
             </table>`;
             
-        this.dom.resultsContainer.querySelectorAll('a[data-link]').forEach(link => {
-            link.addEventListener('click', (e) => {
+        // [修复逻辑] 绑定整行点击事件
+        this.dom.resultsContainer.querySelectorAll('tr[data-link]').forEach(row => {
+            row.addEventListener('click', (e) => {
                 e.preventDefault();
-                window.electronAPI.openExternalLink(e.currentTarget.dataset.link);
+                const url = row.dataset.link;
+                
+                // [安全校验] 只有合法的 HTTP/HTTPS 链接才打开浏览器
+                if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
+                    window.electronAPI.openExternalLink(url);
+                } else {
+                    this._notify('无法打开', '该条目没有有效的跳转链接', 'info');
+                    console.warn('无效链接阻止打开:', url);
+                }
             });
         });
     }

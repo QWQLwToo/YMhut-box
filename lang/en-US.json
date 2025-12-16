@@ -1,11 +1,9 @@
 {
   "comment": "English Language Pack",
-
   "nav.home": "Home",
   "nav.toolbox": "Toolbox",
   "nav.logs": "Logs",
   "nav.settings": "Settings",
-
   "home.greeting.morning": "Good morning, have a wonderful day.",
   "home.greeting.noon": "Good afternoon, time for a break.",
   "home.greeting.afternoon": "Good afternoon, keep up the good work.",
@@ -26,10 +24,8 @@
   "home.updates": "Update Log",
   "home.updates.close": "Close",
   "home.updates.modal.title": "Full Announcement",
-
   "tool.smartSearch.name": "Smart Search",
   "tool.smartSearch.desc": "AI aggregated search for high-quality results",
-
   "common.loading": "Loading...",
   "common.search": "Search",
   "common.backToToolbox": "Back to Toolbox",
@@ -39,7 +35,6 @@
   "common.notification.title.success": "Success",
   "common.notification.title.error": "Error",
   "common.notification.title.info": "Info",
-
   "settings.appearance": "Appearance",
   "settings.updates": "Update Management",
   "settings.about": "About",
@@ -48,7 +43,6 @@
   "settings.status.mem": "Memory",
   "settings.status.gpu": "GPU",
   "settings.status.uptime": "Uptime",
-
   "settings.appearance.title": "Appearance Settings",
   "settings.appearance.theme": "Theme",
   "settings.appearance.language": "Language",
@@ -61,17 +55,14 @@
   "settings.appearance.bg.clear": "Clear",
   "settings.appearance.bg.opacity": "Background Opacity",
   "settings.appearance.card.opacity": "Card Opacity",
-
   "settings.traffic.title": "Traffic Statistics",
   "settings.traffic.total": "Total Usage",
   "settings.traffic.chart.empty.title": "No traffic history",
   "settings.traffic.chart.empty.sub": "Data will be recorded starting today.",
-
   "settings.update.title": "Update Management",
   "settings.update.checkBtn": "Check for Updates",
   "settings.update.checking": "Checking...",
   "settings.update.checkDefault": "Click button to check for new version",
-
   "settings.about.title": "About & Environment",
   "settings.about.version": "Current Version",
   "settings.about.developer": "Developer",

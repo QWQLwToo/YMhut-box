@@ -2,6 +2,7 @@
 import BaseTool from '../baseTool.js';
 import configManager from '../configManager.js';
 import i18n from '../i18n.js';
+import uiManager from '../uiManager.js';
 
 class AITranslationTool extends BaseTool {
     constructor() {
@@ -9,9 +10,15 @@ class AITranslationTool extends BaseTool {
         this.apiKey = configManager.config?.api_keys?.uapipro || null;
         this.abortController = null;
         this.dom = {}; // DOM 元素缓存
-        this.activeDropdowns = []; // 跟踪打开的下拉菜单
+        
+        // [新增] 内部状态，用于存储下拉菜单的选中值
+        this.state = {
+            source_lang: 'auto',
+            target_lang: 'zh-CHS',
+            style: 'professional',
+            context: 'general'
+        };
 
-        // [Req 1] 使用 API 文档中的全部语言
         this.languages = {
             'auto': '自动检测 (Auto)',
             // --- 常用 ---
@@ -88,7 +95,7 @@ class AITranslationTool extends BaseTool {
             'mk': '马其顿语 (Macedonian)',
             'mn': '蒙古语 (Mongolian)',
             'mww': '苗语 (Hmong Daw)',
-            'mnm': 'mnm', // (未知语言代码)
+            'mnm': 'mnm', 
             'xh': '南非科萨语 (Xhosa)',
             'zu': '南非祖鲁语 (Zulu)',
             'ne': '尼泊尔语 (Nepali)',
@@ -126,7 +133,6 @@ class AITranslationTool extends BaseTool {
             'yo': '约鲁巴语 (Yoruba)'
         };
 
-        //
         this.styles = {
             'professional': '专业商务 (默认)',
             'casual': '随意口语化',
@@ -134,7 +140,6 @@ class AITranslationTool extends BaseTool {
             'literary': '文学艺术'
         };
 
-        //
         this.contexts = {
             'general': '通用 (默认)',
             'business': '商务',
@@ -149,7 +154,7 @@ class AITranslationTool extends BaseTool {
     }
 
     render() {
-        // [问题 2 修复] 将 _renderDropdown 的 options 部分 HTML 提取到 render 之外
+        // 将 options HTML 提取到 render 之外，以便 uiManager 移动到 body
         const dropdownOptionsHtml = [
             this._renderDropdownOptions('source_lang', this.languages, 'auto'),
             this._renderDropdownOptions('target_lang', this.languages, 'zh-CHS'),
@@ -233,28 +238,31 @@ class AITranslationTool extends BaseTool {
             preserveFormat: document.getElementById('ai-trans-preserve-format')
         };
 
-        // 绑定事件
+        // 绑定按钮事件
         this.dom.submitBtn.addEventListener('click', this._performTranslation.bind(this));
         this.dom.pasteBtn.addEventListener('click', this._handlePaste.bind(this));
         this.dom.clearBtn.addEventListener('click', this._handleClear.bind(this));
         this.dom.copyBtn.addEventListener('click', this._handleCopy.bind(this));
 
-        // [问题 2 修复] Teleport options to body
-        // [修改] 增加 self.dropdownIds 供 destroy 方法使用
-        this.dropdownIds = ['source_lang', 'target_lang', 'style', 'context'];
-        this.dropdownIds.forEach(id => {
-            const optionsEl = document.getElementById(`dd-options-${id}`);
-            if (optionsEl) {
-                // [修复] 必须附加到 document.body
-                document.body.appendChild(optionsEl);
-            }
-        });
+        // [核心修复] 初始化下拉菜单并绑定状态
+        const dropdowns = [
+            { id: 'source_lang', key: 'source_lang' },
+            { id: 'target_lang', key: 'target_lang' },
+            { id: 'style', key: 'style' },
+            { id: 'context', key: 'context' }
+        ];
 
-        // 绑定所有下拉菜单
-        this.dropdownIds.forEach(id => this._bindDropdown(id));
-        
-        // [问题 2 修复] 移除此工具内的全局点击监听器
-        // 它现在由 view-tool.html 统一处理 (如果需要的话)
+        dropdowns.forEach(dd => {
+            const wrapperId = `dd-wrapper-${dd.id}`;
+            const optionsId = `dd-options-${dd.id}`;
+            
+            // 使用 uiManager 的通用方法
+            uiManager.setupAdaptiveDropdown(wrapperId, optionsId, (value) => {
+                // 回调函数：更新内部状态
+                this.state[dd.key] = value;
+                this._log(`选项更新 [${dd.key}]: ${value}`);
+            });
+        });
     }
 
     async _performTranslation() {
@@ -264,7 +272,8 @@ class AITranslationTool extends BaseTool {
         this.abortController = new AbortController();
 
         const text = this.dom.sourceText.value.trim();
-        const target_lang = this._getDropdownValue('target_lang');
+        // [修复] 从 this.state 读取选中值
+        const target_lang = this.state.target_lang;
 
         if (!text) {
             this._notify(i18n.t('common.notification.title.info'), '请输入要翻译的文本。', 'info');
@@ -280,16 +289,16 @@ class AITranslationTool extends BaseTool {
         this.dom.submitBtn.disabled = true;
 
         const requestBody = {
-            text: text, //
-            target_lang: target_lang, //
-            source_lang: this._getDropdownValue('source_lang') || null, //
-            style: this._getDropdownValue('style'), //
-            context: this._getDropdownValue('context'), //
-            preserve_format: this.dom.preserveFormat.checked, //
-            fast_mode: this.dom.fastMode.checked //
+            text: text, 
+            target_lang: target_lang, 
+            // [修复] 从 this.state 读取选中值
+            source_lang: this.state.source_lang === 'auto' ? null : this.state.source_lang, 
+            style: this.state.style, 
+            context: this.state.context, 
+            preserve_format: this.dom.preserveFormat.checked, 
+            fast_mode: this.dom.fastMode.checked 
         };
 
-        // (参照智能搜索工具的 Key 处理逻辑)
         const requestHeaders = {
             'Content-Type': 'application/json'
         };
@@ -311,11 +320,9 @@ class AITranslationTool extends BaseTool {
             const data = await response.json();
 
             if (!response.ok) {
-                // (400, 401, 429, 500)
                 throw new Error(data.message || data.error || `HTTP 错误 ${response.status}`);
             }
 
-            // (data.data.translated_text)
             if (data.data && data.data.translated_text) {
                 this.dom.targetText.value = data.data.translated_text;
                 this._log(`翻译成功: ${data.data.detected_lang} -> ${target_lang}`);
@@ -369,9 +376,8 @@ class AITranslationTool extends BaseTool {
         });
     }
 
-    // --- 下拉菜单辅助函数 ---
+    // --- 下拉菜单 HTML 生成辅助函数 (供 render 使用) ---
 
-    // [问题 2 修复] 分离：只渲染触发器
     _renderDropdownTrigger(id, options, defaultValue, isRequired = false) {
         return `
         <div class="custom-select-wrapper" id="dd-wrapper-${id}">
@@ -383,7 +389,6 @@ class AITranslationTool extends BaseTool {
         `;
     }
 
-    // [问题 2 修复] 分离：只渲染选项
     _renderDropdownOptions(id, options, defaultValue) {
         let optionsHtml = '';
         const sortedKeys = Object.keys(options);
@@ -424,81 +429,11 @@ class AITranslationTool extends BaseTool {
         return `<div class="custom-select-options" id="dd-options-${id}">${optionsHtml}</div>`;
     }
 
-
-    // [问题 2 修复] 重写 _bindDropdown 以实现动态定位
-    _bindDropdown(id) {
-        const wrapper = document.getElementById(`dd-wrapper-${id}`);
-        const optionsEl = document.getElementById(`dd-options-${id}`); // [修改] 获取全局的 options
-        if (!wrapper || !optionsEl) return;
-        
-        const trigger = wrapper.querySelector('.custom-select-trigger');
-        const valueEl = wrapper.querySelector('.custom-select-value');
-        
-        trigger.addEventListener('click', (e) => {
-            e.stopPropagation();
-            
-            // 关闭所有其他打开的下拉菜单
-            document.querySelectorAll('.custom-select-options.dynamic-active').forEach(openDropdown => {
-                if (openDropdown !== optionsEl) {
-                    openDropdown.classList.remove('dynamic-active');
-                }
-            });
-
-            // 计算位置
-            const rect = trigger.getBoundingClientRect();
-            const optionsHeight = optionsEl.offsetHeight;
-            const windowHeight = window.innerHeight;
-
-            // 检查是否在底部溢出 (使用您建议的上拉)
-            if (rect.bottom + optionsHeight + 5 > windowHeight && rect.top > optionsHeight + 5) {
-                // 如果溢出，并且顶部有足够空间，则向上弹出
-                optionsEl.style.top = `${rect.top - optionsHeight - 5}px`;
-                optionsEl.style.bottom = 'auto';
-                optionsEl.style.transformOrigin = 'bottom center'; // [新增 修复动画]
-            } else {
-                // 否则，向下弹出
-                optionsEl.style.top = `${rect.bottom + 5}px`;
-                optionsEl.style.bottom = 'auto';
-                optionsEl.style.transformOrigin = 'top center'; // [新增 修复动画]
-            }
-            
-            optionsEl.style.left = `${rect.left}px`;
-            optionsEl.style.width = `${rect.width}px`;
-            
-            // 切换当前
-            optionsEl.classList.toggle('dynamic-active');
-            
-            // 更新 activeDropdowns 跟踪
-            if (optionsEl.classList.contains('dynamic-active')) {
-                this.activeDropdowns = [optionsEl];
-            } else {
-                this.activeDropdowns = [];
-            }
-        });
-
-        optionsEl.querySelectorAll('.custom-select-option').forEach(option => {
-            option.addEventListener('click', () => {
-                const newValue = option.dataset.value;
-                const newLabel = option.textContent;
-                
-                trigger.dataset.value = newValue; // 将值存在 trigger 上
-                valueEl.textContent = newLabel;
-                optionsEl.classList.remove('dynamic-active');
-                this.activeDropdowns = [];
-            });
-        });
-    }
-
-    _getDropdownValue(id) {
-        const trigger = document.querySelector(`#dd-wrapper-${id} .custom-select-trigger`);
-        return trigger?.dataset.value || null;
-    }
-
     destroy() {
         if (this.abortController) {
             this.abortController.abort();
         }
-        // [问题 2 修复] 销毁时，移除已“传送”到 body 的下拉菜单元素
+        // 销毁时移除 DOM (因为 uiManager 可能会把它们移到 body)
         (this.dropdownIds || []).forEach(id => {
             document.getElementById(`dd-options-${id}`)?.remove();
         });

@@ -1,76 +1,148 @@
 // src/js/mainPage.js
 import configManager from './configManager.js';
 import uiManager from './uiManager.js';
-import i18n from './i18n.js'; // [Req 1] 导入 i18n
+import i18n from './i18n.js';
+import weatherWidget from './weatherWidget.js'; // [新增] 导入天气组件
+
+// 简易 Markdown 解析器
+function parseMarkdown(text) {
+    if (!text) return '';
+    let html = text
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+        .replace(/`(.*?)`/g, '<code style="background:rgba(255,255,255,0.1); padding:2px 4px; border-radius:4px; font-family:monospace;">$1</code>')
+        .replace(/^- (.*)$/gm, '<li>$1</li>')
+        .replace(/\n/g, '<br>');
+    if (html.includes('<li>')) {
+        html = html.replace(/((<li>.*<\/li>)+)/s, '<ul style="padding-left:20px; margin:5px 0;">$1</ul>');
+    }
+    return html;
+}
 
 class MainPage {
     constructor() {
         this.keySequence = '';
         this.keyTimeout = null;
-        // [修改] 不再使用 onInitialData，改为在 initializeApp 中异步获取
-        this.initializeApp();
         this.isDownloadingUpdate = false;
         this.dbSettings = {};
         this.settingsInterval = null;
         this.dashboardInterval = null;
         this.activeChartInstance = null;
-        this.settingsIntervalHeavy = null; 
+        this.settingsIntervalHeavy = null;
+    }
+
+    // [新增] 统一初始化入口，供 DOMContentLoaded 调用
+    init() {
+        this.initializeApp();
     }
 
     async initializeApp() {
-        // [Req 1] 1. 加载语言
+        // 1. 加载语言
         await this.loadLanguage();
 
-        // [修改] 2. 加载旧的 initial-data (仍然需要)
+        // 2. 加载初始数据 (增加超时兜底，防止IPC通信阻塞导致白屏)
         const config = await new Promise(resolve => {
-            window.electronAPI.onInitialData(resolve);
+            const timeout = setTimeout(() => {
+                console.warn('Initial data timeout, loading defaults...');
+                resolve({ dbSettings: { theme: 'dark' }, isOffline: false });
+            }, 3000);
+
+            window.electronAPI.onInitialData((data) => {
+                clearTimeout(timeout);
+                resolve(data);
+            });
         });
-        
-        // [核心修改 1/3]：移除了 configManager.initializeGlobalFetchMonitor();
-        if (config.isOffline) { uiManager.renderOfflinePage(config.error); return; }
-        
-        this.dbSettings = config.dbSettings;
+
+        if (config.isOffline) { 
+            uiManager.renderOfflinePage(config.error); 
+            return; 
+        }
+
+        this.dbSettings = config.dbSettings || {};
         configManager.setConfig(config);
         uiManager.init();
+        
+        // [新增] 初始化天气组件 (传入预加载数据)
+        if (weatherWidget && weatherWidget.init) {
+            weatherWidget.init(config.initWeatherData || {});
+        }
+
         this.bindWindowControls();
-        this.bindNavigationEvents(); // [修改] 现在会翻译
+        this.bindNavigationEvents();
         this.bindThemeToggle();
         this.addRippleEffectListener();
         this.bindGlobalKeyListener();
-        
-        // [问题 2 修复] 添加统一的全局点击监听器，用于关闭所有动态下拉菜单
+
+        // 全局点击监听器：处理所有自定义下拉菜单的关闭逻辑
         document.addEventListener('click', (e) => {
             document.querySelectorAll('.custom-select-options.dynamic-active').forEach(openDropdown => {
-                // 检查点击是否在下拉菜单 *或* 其关联的触发器之外
                 const wrapperId = openDropdown.id.replace('dd-options-', 'dd-wrapper-');
                 const trigger = document.getElementById(wrapperId);
-                
-                if (openDropdown && !openDropdown.contains(e.target) && trigger && !trigger.contains(e.target)) {
+                if (openDropdown && !openDropdown.contains(e.target) && (!trigger || !trigger.contains(e.target))) {
                     openDropdown.classList.remove('dynamic-active');
                 }
             });
-        }, true);
-        
+        });
+
         window.addEventListener('error', (event) => {
-            const error = event.error;
-            configManager.logAction(`渲染进程发生错误: ${error.message}\nStack: ${error.stack}`, 'error');
+            const error = event.error || {};
+            configManager.logAction(`渲染进程发生错误: ${error.message || 'Unknown'}\nStack: ${error.stack || ''}`, 'error');
             uiManager.showNotification('发生内部错误', '详情已记录到日志中', 'error');
         });
-        this.navigateTo('home');
-        document.getElementById('home-btn').classList.add('active');
+        
+        // [关键修复] 使用 requestAnimationFrame 确保在下一帧（DOM完全就绪）后导航
+        requestAnimationFrame(() => {
+            this.navigateTo('home');
+            
+            const homeBtn = document.getElementById('home-btn');
+            if (homeBtn) {
+                homeBtn.classList.add('active');
+                setTimeout(() => this.updateActiveNavButton(homeBtn), 100);
+            }
+        });
+        
         this.listenForDownloadProgress();
         this.listenForGlobalNetworkSpeed();
+        this.autoCheckUpdates();
+        
         configManager.logAction('主窗口初始化完成', 'system');
     }
-    
-    // [新增] 异步加载语言配置
+
     async loadLanguage() {
         try {
             const langConfig = await window.electronAPI.getLanguageConfig();
-            i18n.init(langConfig.pack, langConfig.fallback);
+            if(langConfig) i18n.init(langConfig.pack, langConfig.fallback);
         } catch (e) {
             console.error("无法加载语言配置:", e);
-            i18n.init(null, {}); // 至少初始化
+            i18n.init(null, {});
+        }
+    }
+
+    async autoCheckUpdates() {
+        const lastCheck = localStorage.getItem('last_auto_update_check');
+        const now = Date.now();
+        const threeDays = 3 * 24 * 60 * 60 * 1000;
+
+        if (!lastCheck || (now - parseInt(lastCheck)) > threeDays) {
+            console.log('[Update] 开始后台自动检查更新...');
+            try {
+                const result = await window.electronAPI.checkUpdates();
+                localStorage.setItem('last_auto_update_check', now.toString());
+                
+                if (result.hasUpdate) {
+                    configManager.logAction(`自动检测到新版本: ${result.remoteVersion}`, 'update');
+                    uiManager.showActionableNotification(
+                        '发现新版本',
+                        `V${result.remoteVersion} 现已发布，包含多项优化。`,
+                        '去更新',
+                        () => {
+                            this.navigateToSettingsForUpdate();
+                        }
+                    );
+                }
+            } catch (e) {
+                console.warn('[Update] 自动检查更新失败:', e.message);
+            }
         }
     }
 
@@ -154,12 +226,11 @@ class MainPage {
     }
 
     bindNavigationEvents() {
-        // [Req 1] 为 title 属性添加翻译
         document.getElementById('home-btn').title = i18n.t('nav.home');
         document.getElementById('toolbox-btn').title = i18n.t('nav.toolbox');
         document.getElementById('log-btn').title = i18n.t('nav.logs');
         document.getElementById('settings-btn').title = i18n.t('nav.settings');
-        
+
         const navActions = {
             'home-btn': () => this.navigateTo('home'),
             'toolbox-btn': () => this.navigateTo('toolbox'),
@@ -167,75 +238,100 @@ class MainPage {
             'settings-btn': () => this.navigateTo('settings'),
         };
         for (const [id, action] of Object.entries(navActions)) {
-            document.getElementById(id).addEventListener('click', (e) => {
-                action();
-                this.updateActiveNavButton(e.currentTarget);
-            });
+            const btn = document.getElementById(id);
+            if (btn) {
+                btn.addEventListener('click', (e) => {
+                    action();
+                    this.updateActiveNavButton(e.currentTarget);
+                });
+            }
         }
     }
 
-    navigateTo(page, subPage = null) {
+    async navigateTo(page, subPage = null) {
         if (this.settingsInterval) { clearInterval(this.settingsInterval); this.settingsInterval = null; }
         if (this.settingsIntervalHeavy) { clearInterval(this.settingsIntervalHeavy); this.settingsIntervalHeavy = null; }
         if (this.dashboardInterval) { clearInterval(this.dashboardInterval); this.dashboardInterval = null; }
         if (this.activeChartInstance) { this.activeChartInstance.destroy(); this.activeChartInstance = null; }
 
-        if (page !== 'home') {
-            document.getElementById('update-slide-out-panel')?.remove();
-            document.getElementById('announcement-modal')?.remove();
-            document.getElementById('update-panel-overlay')?.remove();
-        }
-        
-        // [问题 2 修复] 导航时，移除可能已“传送”的下拉菜单
+        document.getElementById('update-slide-out-panel')?.remove();
+        document.getElementById('announcement-modal')?.remove();
+        document.getElementById('update-panel-overlay')?.remove();
         document.getElementById('dd-options-lang-select-wrapper')?.remove();
+        document.getElementById('dd-options-font-select')?.remove(); 
+        document.getElementById('font-download-modal')?.remove(); 
 
         uiManager.unloadActiveTool();
         configManager.logAction(`导航到: ${page}`, 'navigation');
-        
+
+        const contentArea = document.getElementById('content-area');
+
+        if (contentArea.children.length > 0) {
+            contentArea.classList.add('page-exit');
+            await new Promise(r => setTimeout(r, 150)); 
+            contentArea.classList.remove('page-exit');
+        }
+
+        switch (page) {
+            case 'home':
+                await this.renderWelcomePage();
+                break;
+            case 'toolbox':
+                uiManager.renderToolboxPage();
+                break;
+            case 'logs':
+                this.renderLogsPage(new Date().toISOString().split('T')[0]);
+                break;
+            case 'settings':
+                await this.renderSettingsPage();
+                if (subPage) {
+                    setTimeout(() => {
+                        const targetNavItem = document.querySelector(`.island-nav-item[data-panel="${subPage}"]`);
+                        if (targetNavItem) targetNavItem.click();
+                    }, 100); 
+                }
+                break;
+        }
+
+        contentArea.classList.add('page-enter');
         setTimeout(() => {
-            switch (page) {
-                case 'home': 
-                    this.renderWelcomePage(); 
-                    break;
-                case 'toolbox': 
-                    uiManager.renderToolboxPage();
-                    break;
-                case 'logs': 
-                    this.renderLogsPage(new Date().toISOString().split('T')[0]); 
-                    break;
-                case 'settings':
-                    this.renderSettingsPage();
-                    if (subPage) {
-                        const targetNavItem = document.querySelector(`.settings-nav-item[data-panel="${subPage}"]`);
-                        const targetPanel = document.getElementById(`${subPage}-panel`);
-                        if (targetNavItem && targetPanel) {
-                            document.querySelector('.settings-nav-item.active')?.classList.remove('active');
-                            document.querySelector('.settings-panel.active')?.classList.remove('active');
-                            targetNavItem.classList.add('active');
-                            targetPanel.classList.add('active');
-                        }
-                    }
-                    break;
-            }
-        }, 20);
+            contentArea.classList.remove('page-enter');
+        }, 200);
     }
 
     updateActiveNavButton(activeButton) {
         document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
-        if (activeButton) activeButton.classList.add('active');
+        
+        if (activeButton) {
+            activeButton.classList.add('active');
+            const slider = document.getElementById('nav-active-slider');
+            if (slider) {
+                const targetTop = activeButton.offsetTop;
+                const targetHeight = activeButton.offsetHeight;
+                slider.style.top = `${targetTop}px`;
+                slider.style.height = `${targetHeight}px`;
+            }
+        }
     }
 
     async renderWelcomePage() {
         const toolStatus = configManager.config?.tool_status || {};
         const searchToolStatus = toolStatus['smart-search'] || { enabled: true };
         const isSmartSearchEnabled = searchToolStatus.enabled;
-        const searchDisabledMessage = isSmartSearchEnabled 
-            ? "" 
-            : (searchToolStatus.message || i18n.t('home.search.disabled'));
+        const searchDisabledMessage = isSmartSearchEnabled ? "" : (searchToolStatus.message || i18n.t('home.search.disabled'));
 
         const contentArea = document.getElementById('content-area');
         const appVersion = await window.electronAPI.getAppVersion();
-        const announcement = configManager.config?.home_notes;
+
+        const fullAnnouncement = configManager.config?.home_notes || i18n.t('home.announcement.failed');
+        const stripHtml = (html) => {
+            let tmp = document.createElement("DIV");
+            tmp.innerHTML = html;
+            return tmp.textContent || tmp.innerText || "";
+        };
+        const plainText = stripHtml(fullAnnouncement);
+        const truncatedText = plainText.length > 50 ? plainText.substring(0, 50) + '...' : plainText;
+
         const newNotes = configManager.config?.update_notes || {};
 
         const getGreeting = () => {
@@ -250,10 +346,13 @@ class MainPage {
         const createNotesHtml = (notes) => {
             const entries = Object.entries(notes);
             if (entries.length === 0) return '<p class="empty-notes">暂无更新详情。</p>';
-            return entries.map(([key, value]) => `<div class="changelog-item"><span class="changelog-key">${key}</span><div class="changelog-value">${value.replace(/<br>/g, '<br/>')}</div></div>`).join('');
+            return entries.map(([key, value]) => `
+                <div class="changelog-item">
+                    <span class="changelog-key">${key}</span>
+                    <div class="changelog-value">${parseMarkdown(value)}</div>
+                </div>`).join('');
         };
 
-        // [Req 1] 翻译 UI
         contentArea.innerHTML = `
             <div class="page-container welcome-dashboard">
                 <div class="welcome-header">
@@ -265,10 +364,15 @@ class MainPage {
                         <i class="fas fa-box-open"></i> ${i18n.t('home.updates')}
                     </button>
                 </div>
-                <div id="compact-announcement-card" class="compact-announcement">
+                
+                <div id="compact-announcement-card" class="compact-announcement is-overflowing" style="cursor: pointer;">
                     <div class="icon"><i class="fas fa-bullhorn"></i></div>
-                    <p id="compact-announcement-text">${announcement || i18n.t('home.announcement.failed')}</p>
+                    <div style="flex:1; overflow:hidden;">
+                        <p id="compact-announcement-text" style="margin:0; font-weight:500; color:var(--text-secondary);">${truncatedText}</p>
+                    </div>
+                    <div style="font-size:12px; color:var(--primary-color); white-space:nowrap;">${i18n.t('home.announcement.viewFull')} <i class="fas fa-chevron-right" style="font-size:10px;"></i></div>
                 </div>
+
                 <div class="welcome-search-bar" title="${searchDisabledMessage}">
                     <input type="text" id="welcome-search-input" placeholder="${isSmartSearchEnabled ? i18n.t('home.search.placeholder') : searchDisabledMessage}" ${!isSmartSearchEnabled ? 'disabled' : ''}>
                     <button id="welcome-search-btn" class="action-btn ripple" ${!isSmartSearchEnabled ? 'disabled' : ''}>
@@ -287,16 +391,16 @@ class MainPage {
             </div>
             <div class="version-display">v${appVersion}</div>
         `;
-        
+
         uiManager.fadeInContent('.welcome-header, .compact-announcement, .welcome-search-bar');
-        
-        // [修复] 确保这三个元素总是一起被创建
+
+        // 更新日志面板
         if (!document.getElementById('update-slide-out-panel')) {
             const panelHtml = `
             <div id="update-slide-out-panel" class="update-slide-out-panel">
                 <div class="update-panel-header">
                     <h2><i class="fas fa-box-open"></i> ${i18n.t('home.updates')}</h2>
-                    <button id="close-update-panel-btn" class="window-control-btn" title="${i18n.t('home.updates.close')}">
+                    <button id="close-update-panel-btn" title="${i18n.t('home.updates.close')}">
                         <i class="fas fa-times"></i>
                     </button>
                 </div>
@@ -304,38 +408,38 @@ class MainPage {
             </div>`;
             document.body.insertAdjacentHTML('beforeend', panelHtml);
         }
+
+        // 公告弹窗
         if (!document.getElementById('announcement-modal')) {
             const modalHtml = `
             <div id="announcement-modal" class="modal-overlay">
                 <div class="modal-content">
                     <div class="modal-header">
                         <h3><i class="fas fa-bullhorn"></i> ${i18n.t('home.updates.modal.title')}</h3>
-                        <button id="modal-close-btn" class="window-control-btn" title="${i18n.t('home.updates.close')}">
+                        <button id="modal-close-btn" title="${i18n.t('home.updates.close')}">
                             <i class="fas fa-times"></i>
                         </button>
                     </div>
-                    <div class="modal-body"><p id="modal-announcement-content"></p></div>
+                    <div class="modal-body"><div id="modal-announcement-content" style="line-height: 1.8;"></div></div>
                 </div>
             </div>`;
             document.body.insertAdjacentHTML('beforeend', modalHtml);
         }
-        
+
+        // 遮罩层
         if (!document.getElementById('update-panel-overlay')) {
             const overlayHtml = `<div id="update-panel-overlay" class="update-panel-overlay"></div>`;
             document.body.insertAdjacentHTML('beforeend', overlayHtml);
         }
-        // [修复] 结束
 
         if (this.dashboardInterval) { clearInterval(this.dashboardInterval); this.dashboardInterval = null; }
 
-        // [修复] 确保所有元素都被正确获取
         const searchInput = document.getElementById('welcome-search-input');
         const searchBtn = document.getElementById('welcome-search-btn');
         const updatePanel = document.getElementById('update-slide-out-panel');
         const showUpdateBtn = document.getElementById('show-update-log-btn');
         const closeUpdateBtn = document.getElementById('close-update-panel-btn');
         const announcementCard = document.getElementById('compact-announcement-card');
-        const announcementText = document.getElementById('compact-announcement-text');
         const modalOverlay = document.getElementById('announcement-modal');
         const modalContent = document.getElementById('modal-announcement-content');
         const modalCloseBtn = document.getElementById('modal-close-btn');
@@ -344,14 +448,13 @@ class MainPage {
         if (isSmartSearchEnabled) {
             const onSearch = () => {
                 const query = searchInput.value.trim();
-                if (query) { this._performWelcomeSearch(query); } 
+                if (query) { this._performWelcomeSearch(query); }
                 else { uiManager.showNotification(i18n.t('common.notification.title.info'), i18n.t('home.search.placeholder'), 'info'); }
             };
             searchBtn?.addEventListener('click', onSearch);
             searchInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') onSearch(); });
         }
 
-        // [修复] 确保 updatePanel 和 updateOverlay 存在
         const closeUpdatePanel = () => {
             updatePanel?.classList.remove('active');
             updateOverlay?.classList.remove('active');
@@ -360,7 +463,7 @@ class MainPage {
             updatePanel?.classList.add('active');
             updateOverlay?.classList.add('active');
         };
-        
+
         showUpdateBtn?.addEventListener('click', () => {
             if (updatePanel.classList.contains('active')) {
                 closeUpdatePanel();
@@ -370,17 +473,12 @@ class MainPage {
         });
         closeUpdateBtn?.addEventListener('click', closeUpdatePanel);
         updateOverlay?.addEventListener('click', closeUpdatePanel);
-        // [修复] 结束
 
-        if (announcementCard && announcementText && modalOverlay) {
-            if (announcementText.scrollWidth > announcementText.clientWidth) {
-                announcementCard.classList.add('is-overflowing');
-                announcementCard.addEventListener('click', () => {
-                    const fullAnnouncementHTML = configManager.config?.home_notes || i18n.t('home.announcement.failed');
-                    modalContent.innerHTML = fullAnnouncementHTML;
-                    modalOverlay.classList.add('active');
-                });
-            }
+        if (announcementCard && modalOverlay) {
+            announcementCard.addEventListener('click', () => {
+                modalContent.innerHTML = fullAnnouncement;
+                modalOverlay.classList.add('active');
+            });
             modalCloseBtn.addEventListener('click', () => { modalOverlay.classList.remove('active'); });
             modalOverlay.addEventListener('click', (e) => {
                 if (e.target === modalOverlay) { modalOverlay.classList.remove('active'); }
@@ -411,7 +509,7 @@ class MainPage {
             });
             const data = await response.json();
             if (!response.ok) throw new Error(data.message || `HTTP 错误 ${response.status}`);
-            
+
             configManager.logAction(`[主页搜索] 成功: ${query}`, 'tool');
             this._renderWelcomeResults(data, query);
 
@@ -429,14 +527,14 @@ class MainPage {
     _renderWelcomeResults(data, query) {
         const resultsContainer = document.getElementById('welcome-search-results-container');
         if (!resultsContainer) return;
-        
+
         const results = data.results || [];
 
         if (results.length === 0) {
             resultsContainer.innerHTML = `
                 <div class="empty-logs-placeholder" style="margin: auto;">
                     <i class="fas fa-box-open"></i>
-                    <p>${i18n.t('home.search.results.empty.title', {query: query})}</p>
+                    <p>${i18n.t('home.search.results.empty.title', { query: query })}</p>
                     <span>${i18n.t('home.search.results.empty.sub')}</span>
                 </div>`;
             return;
@@ -462,7 +560,7 @@ class MainPage {
 
         const statsHtml = `
             <div class="search-stats" style="font-size: 13px; color: var(--text-secondary); margin: 5px 15px 15px;">
-                ${i18n.t('home.search.results.stats', {count: data.total_results || 0, time: data.process_time_ms})}
+                ${i18n.t('home.search.results.stats', { count: data.total_results || 0, time: data.process_time_ms })}
             </div>
         `;
 
@@ -485,8 +583,8 @@ class MainPage {
             configManager.logAction(`[主页搜索] 跳转到工具: ${query}`, 'navigation');
             this.navigateTo('toolbox');
             this.updateActiveNavButton(document.getElementById('toolbox-btn'));
-            
-            uiManager.launchModularTool('smart-search'); 
+
+            uiManager.launchModularTool('smart-search');
 
             setTimeout(() => {
                 const toolInput = document.getElementById('ss-query-input');
@@ -505,16 +603,18 @@ class MainPage {
         const contentArea = document.getElementById('content-area');
         const todayString = new Date().toISOString().split('T')[0];
 
-        // [滚动条修复] 为 .page-container 添加 flex 布局样式
         contentArea.innerHTML = `
-            <div class="page-container" style="display: flex; flex-direction: column; height: 100%;">
-                <div class="section-header logs-header">
-                    <h1><i class="fas fa-history"></i> ${i18n.t('nav.logs')}</h1>
+            <div class="page-container logs-page-container">
+                <div class="logs-header-island">
+                    <div class="logs-title">
+                        <i class="fas fa-layer-group" style="color:var(--primary-color);"></i>
+                        <span>运行日志</span>
+                    </div>
                     <div class="logs-controls">
                         <input type="date" id="log-date-picker" value="${filterDate === 'all' ? todayString : filterDate}">
-                        <button id="show-today-logs" class="control-btn ripple">今天</button>
-                        <button id="show-all-logs" class="control-btn ripple">近期历史</button>
-                        <button id="clear-logs" class="action-btn error-btn ripple"><i class="fas fa-trash"></i> 清空日志</button>
+                        <button id="show-today-logs" class="control-btn mini-btn ripple" title="回到今天"><i class="fas fa-calendar-day"></i> 今天</button>
+                        <button id="show-all-logs" class="control-btn mini-btn ripple" title="查看所有"><i class="fas fa-list-ul"></i> 近期</button>
+                        <button id="clear-logs" class="action-btn mini-btn error-btn ripple" title="清空记录"><i class="fas fa-trash-alt"></i></button>
                     </div>
                 </div>
                 <div id="logs-content-container" class="logs-container">
@@ -524,11 +624,11 @@ class MainPage {
                     </div>
                 </div>
             </div>`;
-        
+
         this.bindLogPageEvents();
         this._fetchAndRenderLogs(filterDate);
     }
-    
+
     async _fetchAndRenderLogs(filterDate) {
         const dateQuery = filterDate === 'all' ? null : filterDate;
         let logs;
@@ -537,14 +637,19 @@ class MainPage {
         try {
             logs = await window.electronAPI.getLogs(dateQuery);
         } catch (error) {
-            if(logsContainer) {
-                logsContainer.innerHTML = `<div class="empty-logs-placeholder"><i class="fas fa-exclamation-triangle"></i><p>加载日志失败</p><span>${error.message}</span></div>`;
+            if (logsContainer) {
+                logsContainer.innerHTML = `
+                    <div class="empty-island-state">
+                        <div class="empty-icon" style="color:var(--error-color);"><i class="fas fa-bug"></i></div>
+                        <p>日志加载失败</p>
+                        <span>${error.message}</span>
+                    </div>`;
             }
             return;
         }
 
         const groupedLogs = logs.reduce((acc, log) => {
-            const date = new Date(log.timestamp).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
+            const date = new Date(log.timestamp).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '-');
             if (!acc[date]) acc[date] = [];
             acc[date].push(log);
             return acc;
@@ -552,31 +657,52 @@ class MainPage {
 
         const renderLogEntries = (grouped) => {
             if (Object.keys(grouped).length === 0) {
-                return '<div class="empty-logs-placeholder"><i class="fas fa-box-open"></i><p>当日暂无日志记录</p><span>尝试选择其他日期或查看近期历史。</span></div>';
+                return `
+                    <div class="empty-island-state">
+                        <div class="empty-icon"><i class="fas fa-clipboard-check"></i></div>
+                        <p>暂无日志记录</p>
+                        <span>系统运行平稳，无事发生。</span>
+                    </div>`;
             }
+
             let html = '';
-            const categoryMap = { system: { icon: 'fa-desktop', name: '系统' }, navigation: { icon: 'fa-route', name: '导航' }, ui: { icon: 'fa-palette', name: '界面' }, tool: { icon: 'fa-wrench', name: '工具' }, update: { icon: 'fa-arrow-alt-circle-up', name: '更新' }, settings: { icon: 'fa-cog', name: '设置' }, error: { icon: 'fa-exclamation-triangle', name: '错误' }, general: { icon: 'fa-info-circle', name: '通用' } };
+            const categoryMap = {
+                system:     { icon: 'fa-server',        class: 'log-tag-system' },
+                navigation: { icon: 'fa-location-arrow',class: 'log-tag-nav' },
+                ui:         { icon: 'fa-swatchbook',    class: 'log-tag-ui' },
+                tool:       { icon: 'fa-microchip',     class: 'log-tag-tool' },
+                update:     { icon: 'fa-rocket',        class: 'log-tag-update' },
+                settings:   { icon: 'fa-sliders-h',     class: 'log-tag-settings' },
+                error:      { icon: 'fa-bomb',          class: 'log-tag-error' },
+                general:    { icon: 'fa-info-circle',   class: 'log-tag-general' }
+            };
+
             for (const date in grouped) {
                 const dayOfWeek = new Date(grouped[date][0].timestamp).toLocaleDateString('zh-CN', { weekday: 'long' });
                 html += `<div class="log-day-group">`;
-                html += `<div class="log-date-header">${date}，${dayOfWeek}</div>`;
+                html += `<div class="log-date-pill"><i class="far fa-calendar-alt"></i> ${date} · ${dayOfWeek}</div>`;
+                
                 html += grouped[date].map(log => {
-                    const categoryInfo = categoryMap[log.category] || categoryMap.general;
+                    const catInfo = categoryMap[log.category] || categoryMap.general;
                     const time = new Date(log.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
                     let mainAction = log.action;
-                    let subCategoryTag = '';
+                    let subTagHtml = '';
+                    
                     const subCategoryMatch = log.action.match(/^\[(.*?)\]\s(.*)$/);
-                    if (log.category === 'tool' && subCategoryMatch) {
+                    if (subCategoryMatch) {
                         const subCategoryName = subCategoryMatch[1];
                         mainAction = subCategoryMatch[2];
-                        subCategoryTag = `<span class="log-tag log-category-sub">${subCategoryName}</span>`;
+                        subTagHtml = `<span class="log-sub-tag">${subCategoryName}</span>`;
                     }
-                    return `<div class="log-entry">
-                                <span class="log-timestamp">${time}</span>
-                                <span class="log-tag log-category-${log.category}"><i class="fas ${categoryInfo.icon}"></i> ${categoryInfo.name}</span>
-                                ${subCategoryTag}
-                                <span class="log-action">${mainAction}</span>
-                            </div>`;
+
+                    return `
+                        <div class="log-card-island">
+                            <div class="log-time">${time}</div>
+                            <div class="log-icon-box ${catInfo.class}"><i class="fas ${catInfo.icon}"></i></div>
+                            <div class="log-text">${subTagHtml}${mainAction}</div>
+                            <button class="log-copy-btn ripple" onclick="navigator.clipboard.writeText('${mainAction.replace(/'/g, "\\'")}')" title="复制内容"><i class="far fa-copy"></i></button>
+                        </div>
+                    `;
                 }).join('');
                 html += `</div>`;
             }
@@ -585,6 +711,12 @@ class MainPage {
 
         if (logsContainer) {
             logsContainer.innerHTML = renderLogEntries(groupedLogs);
+            const cards = logsContainer.querySelectorAll('.log-card-island');
+            cards.forEach((card, i) => {
+                card.style.opacity = '0';
+                card.style.transform = 'translateY(10px)';
+                card.style.animation = `contentFadeIn 0.4s ease forwards ${i * 0.03}s`;
+            });
         }
     }
 
@@ -593,29 +725,22 @@ class MainPage {
         const logsContainer = document.getElementById('logs-content-container');
 
         const loadLogs = (filterDate) => {
-            if(logsContainer) {
+            if (logsContainer) {
                 logsContainer.innerHTML = `<div class="loading-container" style="padding: 60px 0;"><img src="./assets/loading.gif" alt="加载中..." class="loading-gif"><p class="loading-text">${i18n.t('common.loading')}...</p></div>`;
             }
             this._fetchAndRenderLogs(filterDate);
         };
-        
-        datePicker.addEventListener('change', (e) => {
-            loadLogs(e.target.value);
-        });
-        
+
+        datePicker.addEventListener('change', (e) => { loadLogs(e.target.value); });
         document.getElementById('show-today-logs').addEventListener('click', () => {
             const todayString = new Date().toISOString().split('T')[0];
             datePicker.value = todayString;
             loadLogs(todayString);
         });
-        
-        document.getElementById('show-all-logs').addEventListener('click', () => {
-            loadLogs('all');
-        });
-
+        document.getElementById('show-all-logs').addEventListener('click', () => { loadLogs('all'); });
         document.getElementById('clear-logs')?.addEventListener('click', async () => {
             if (confirm('确定要清空所有日志记录吗？此操作不可逆！')) {
-                await window.electronAPI.clearLogs(); 
+                await window.electronAPI.clearLogs();
                 uiManager.showNotification(i18n.t('common.notification.title.success'), '所有日志已被清空。');
                 loadLogs(datePicker.value || 'all');
             }
@@ -629,148 +754,285 @@ class MainPage {
             window.electronAPI.getTrafficStats(),
             window.electronAPI.getLanguageConfig()
         ]);
-        
-        // [新增] 获取配置版本
         const configVersion = configManager.config?.config_version || 'N/A';
 
-        const hasBgImage = this.dbSettings.backgroundImage && this.dbSettings.backgroundImage.length > 0;
-        const expandedClass = hasBgImage ? 'expanded' : '';
-        const opacityControlsDisabled = hasBgImage ? '' : 'disabled';
-        
-        // [Req 1] 创建语言选项
         const langOptions = [
             { key: 'auto', label: i18n.t('settings.appearance.language.auto') },
             { key: 'zh-CN', label: i18n.t('settings.appearance.language.zh-CN') },
             { key: 'en-US', label: i18n.t('settings.appearance.language.en-US') }
         ];
-        
-        // [问题 2 修复] 修改语言下拉菜单的 HTML，使其与 aiTranslationTool 类似
+
         const langSelectHtml = `
             <div class="custom-select-wrapper" id="dd-wrapper-lang-select-wrapper">
                 <div class="custom-select-trigger">
-                    <span id="lang-select-value">${langOptions.find(o => o.key === langConfig.current)?.label || 'N/A'}</span>
+                    <span class="custom-select-value">${langOptions.find(o => o.key === langConfig.current)?.label || 'N/A'}</span>
                     <i class="fas fa-chevron-down custom-select-arrow"></i>
                 </div>
-            </div>
-            `;
-        
-        // [修改] 单独定义 options HTML，以便 teleport
+            </div>`;
+
         const langOptionsHtml = `
             <div class="custom-select-options" id="dd-options-lang-select-wrapper">
                 ${langOptions.map(opt => `<div class="custom-select-option" data-value="${opt.key}">${opt.label}</div>`).join('')}
-            </div>
-        `;
+            </div>`;
 
+        const availableFonts = [
+            { name: 'Default', label: '系统默认 (Default)', url: '' },
+            { name: 'MeiGanShouXieTi', label: '梅干手写体', url: 'https://update.ymhut.cn/fonts/MeiGanShouXieTi-2.ttf' },
+            { name: 'QianTuBiFeng', label: '千图笔锋手写体', url: 'https://update.ymhut.cn/fonts/QianTuBiFengShouXieTi-2.ttf' },
+            { name: 'YOzBS', label: 'YOz手写体', url: 'https://update.ymhut.cn/fonts/YOzBS-2.otf' }
+        ];
+        const currentFontName = this.dbSettings.customFontName || 'Default';
 
-        // [Req 1] 翻译 UI
+        const fontSelectHtml = `
+            <div class="custom-select-wrapper" id="dd-wrapper-font-select">
+                <div class="custom-select-trigger">
+                    <span class="custom-select-value" id="font-select-value">${availableFonts.find(f => f.name === currentFontName)?.label || '系统默认'}</span>
+                    <i class="fas fa-chevron-down custom-select-arrow"></i>
+                </div>
+            </div>`;
+
+        const fontOptionsHtml = `
+            <div class="custom-select-options" id="dd-options-font-select">
+                ${availableFonts.map(f => `<div class="custom-select-option" data-value="${f.name}" data-url="${f.url}">${f.label}</div>`).join('')}
+            </div>`;
+        
+        const fontModalHtml = `
+            <div id="font-download-modal" class="font-download-modal">
+                <div class="font-modal-card">
+                    <div class="font-modal-icon"><i class="fas fa-cloud-download-alt fa-bounce"></i></div>
+                    <h3 style="margin:0 0 10px 0;">正在配置字体</h3>
+                    <p id="font-download-status" style="color:var(--text-secondary); font-size:13px;">准备下载...</p>
+                    <div class="font-progress-bg">
+                        <div id="font-download-bar" class="font-progress-bar"></div>
+                    </div>
+                    <p id="font-download-percent" style="font-size:12px; font-family:monospace;">0%</p>
+                </div>
+            </div>`;
+
         contentArea.innerHTML = `
             <div class="page-container settings-page-container">
-                <div class="settings-nav">
+                <nav class="settings-nav-island">
                     <div>
-                        <button class="settings-nav-item active" data-panel="appearance"><i class="fas fa-palette"></i> ${i18n.t('settings.appearance')}</button>
-                        <button class="settings-nav-item" data-panel="update"><i class="fas fa-sync-alt"></i> ${i18n.t('settings.updates')}</button>
-                        <button class="settings-nav-item" data-panel="about"><i class="fas fa-info-circle"></i> ${i18n.t('settings.about')}</button>
+                        <div class="nav-group-title">控制中心</div>
+                        <button class="island-nav-item active" data-panel="appearance">
+                            <i class="fas fa-swatchbook icon-gradient icon-gradient-appearance" style="width:20px;"></i> 
+                            <span class="nav-text">${i18n.t('settings.appearance')}</span>
+                        </button>
+                        <button class="island-nav-item" data-panel="update">
+                            <i class="fas fa-cloud-upload-alt icon-gradient icon-gradient-update" style="width:20px;"></i> 
+                            <span class="nav-text">${i18n.t('settings.updates')}</span>
+                        </button>
+                        <button class="island-nav-item" data-panel="about">
+                            <i class="fas fa-id-card icon-gradient icon-gradient-about" style="width:20px;"></i> 
+                            <span class="nav-text">${i18n.t('settings.about')}</span>
+                        </button>
                     </div>
-                    <div id="settings-status-panel">
-                         <div class="status-panel-title">${i18n.t('settings.status.monitor')}</div>
-                         <div class="status-item">
-                            <div class="status-label"><span>${i18n.t('settings.status.cpu')}</span><span id="cpu-usage-text">0.00%</span></div>
-                            <div class="status-bar-container"><div class="status-bar" id="cpu-usage-bar" style="width: 0%;"></div></div>
+                    
+                    <div style="flex-grow: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 15px; padding-bottom: 20px;">
+                        <div class="mini-status-item">
+                            <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px; color:var(--text-secondary);"><span><i class="fas fa-microchip"></i> CPU</span><span id="cpu-usage-text">0%</span></div>
+                            <div class="island-progress-track" style="height:6px;"><div id="cpu-usage-bar" class="island-progress-bar" style="width:0%; background:var(--primary-color);"></div></div>
                         </div>
-                        <div class="status-item">
-                            <div class="status-label"><span>${i18n.t('settings.status.mem')}</span><span id="mem-usage-text">0.00%</span></div>
-                            <div class="status-bar-container"><div class="status-bar" id="mem-usage-bar" style="width: 0%;"></div></div>
-                        </div>
-                        <div id="gpu-stats-container"></div>
-                        <div class="status-item">
-                            <div class="status-label"><span>${i18n.t('settings.status.uptime')}</span><span id="app-uptime-text">00:00:00</span></div>
+                        <div class="mini-status-item">
+                            <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px; color:var(--text-secondary);"><span><i class="fas fa-memory"></i> RAM</span><span id="mem-usage-text">0%</span></div>
+                            <div class="island-progress-track" style="height:6px;"><div id="mem-usage-bar" class="island-progress-bar" style="width:0%; background:var(--secondary-color);"></div></div>
                         </div>
                     </div>
-                </div>
 
-                <div class="settings-content">
+                    <div style="padding-top: 15px; border-top: 1px solid var(--border-color);">
+                        <div class="status-label" style="margin-bottom:5px;"><i class="fas fa-clock"></i> <span id="app-uptime-text" style="font-family:monospace;">00:00:00</span></div>
+                        <div style="font-size:11px; color:var(--text-secondary);">系统运行正常</div>
+                    </div>
+                </nav>
+
+                <div class="settings-content-island">
                     <div id="appearance-panel" class="settings-panel active">
-                        <div class="settings-section">
-                            <h2><i class="fas fa-palette"></i> ${i18n.t('settings.appearance.title')}</h2>
-                            <div class="settings-row"><span>${i18n.t('settings.appearance.theme')}</span><label class="theme-switch"><input type="checkbox" id="theme-switch-input" ${this.dbSettings.theme === 'dark' ? 'checked' : ''}><span class="slider"></span></label></div>
-                            <div class="settings-row">
-                                <span>${i18n.t('settings.appearance.language')}</span>
-                                ${langSelectHtml}
-                            </div>
-                            <div class="settings-row collapsible-trigger ${expandedClass}" id="custom-bg-trigger"><span>${i18n.t('settings.appearance.bg')}</span><div class="background-controls"><button id="select-bg-btn" class="control-btn mini-btn ripple"><i class="fas fa-image"></i> ${i18n.t('settings.appearance.bg.select')}</button><button id="clear-bg-btn" class="control-btn mini-btn ripple"><i class="fas fa-times"></i> ${i18n.t('settings.appearance.bg.clear')}</button><span class="icon-toggle"></span></div></div>
-                            <div class="collapsible-content ${expandedClass}">
-                                <div class="settings-row"><span>${i18n.t('settings.appearance.bg.opacity')}</span><div class="opacity-control"><input type="range" id="opacity-slider" min="0.1" max="1" step="0.05" value="${this.dbSettings.backgroundOpacity}" ${opacityControlsDisabled}><span id="opacity-value">${Math.round(this.dbSettings.backgroundOpacity * 100)}%</span></div></div>
-                                <div class="settings-row"><span>${i18n.t('settings.appearance.card.opacity')}</span><div class="opacity-control"><input type="range" id="card-opacity-slider" min="0.1" max="1" step="0.05" value="${this.dbSettings.cardOpacity}" ${opacityControlsDisabled}><span id="card-opacity-value">${Math.round(this.dbSettings.cardOpacity * 100)}%</span></div></div>
-                            </div>
+                        <div class="setting-island">
+                            <h2><i class="fas fa-paint-roller"></i> 个性化</h2>
+                            <div class="setting-row-island"><span>界面主题</span><label class="theme-switch"><input type="checkbox" id="theme-switch-input" ${this.dbSettings.theme === 'dark' ? 'checked' : ''}><span class="slider"></span></label></div>
+                            <div class="setting-row-island"><span>界面语言</span>${langSelectHtml}</div>
+                            <div class="setting-row-island"><span>UI 字体</span>${fontSelectHtml}</div>
                         </div>
-                        <div class="settings-section">
-                            <h2><i class="fas fa-chart-bar"></i> ${i18n.t('settings.traffic.title')}</h2>
-                            <div class="info-grid horizontal">
-                                <div class="info-item">
-                                    <span class="info-label">${i18n.t('settings.traffic.total')}</span>
-                                    <span class="info-value gradient-text">${configManager.formatBytes(traffic)}</span>
-                                </div>
-                            </div>
-                            <div id="traffic-chart-container" style="margin-top: 20px; height: 250px;">
+                        <div class="setting-island">
+                            <h2><i class="fas fa-network-wired"></i> 网络监控</h2>
+                            <div id="traffic-chart-container" style="position: relative; height: 250px; width: 100%;">
                                 <canvas id="traffic-chart"></canvas>
                             </div>
+                            <div style="margin-top:15px; display:flex; justify-content:space-between; font-size:13px;">
+                                <span style="color:var(--text-secondary);">累计消耗</span>
+                                <span class="gradient-text" style="font-weight:700;">${configManager.formatBytes(traffic)}</span>
+                            </div>
                         </div>
                     </div>
+
                     <div id="update-panel" class="settings-panel">
-                        <div class="settings-section">
-                            <h2><i class="fas fa-sync-alt"></i> ${i18n.t('settings.updates')}</h2>
-                            <div id="update-check-wrapper"><button id="update-button" class="update-button ripple"><span class="text">${i18n.t('settings.update.checkBtn')}</span><span class="scan-bar"></span></button></div>
-                            <div id="update-info-container"><p style="text-align:center; color: var(--text-secondary);">${i18n.t('settings.update.checkDefault')}</p></div>
-                        </div>
+                        <div class="setting-island" id="update-state-container" style="min-height: 400px; display: flex; align-items: center; justify-content: center;">
+                            </div>
                     </div>
                     
                     <div id="about-panel" class="settings-panel">
-                        <div class="settings-grid">
-                        
-                            <div class="author-card" style="margin: 0;">
-                                <div class="author-avatar">
-                                    <i class="fas fa-user-astronaut"></i>
-                                </div>
-                                <h2 class="author-name">YMHUT</h2>
-                                <p class="author-desc">开发者 & 设计者</p>
-                                <div class="author-links">
-                                    <button class="link-btn ripple" id="author-website-btn"><i class="fas fa-globe"></i> 官网</button>
-                                    <button class="link-btn ripple" id="feedback-btn"><i class="fas fa-envelope"></i> 反馈</button>
-                                </div>
+                        <div class="setting-island dev-profile-card">
+                            <div class="dev-avatar"><img src="./assets/author_avatar.png" alt="Avatar" style="width:100%; height:100%; object-fit:cover; border-radius:50%;"></div>
+                            <div style="flex-grow:1;"><h2 style="margin:0 0 5px 0;">YMHUT</h2><p style="margin:0; opacity:0.7; font-size:13px;">功不唐捐，玉汝于成</p></div>
+                            <div style="display:flex; gap:10px;">
+                                <button class="control-btn mini-btn ripple" id="author-website-btn"><i class="fas fa-globe"></i></button>
+                                <button class="control-btn mini-btn ripple" id="feedback-btn"><i class="fas fa-envelope"></i></button>
                             </div>
-                            
-                            <div class="settings-section" style="margin: 0; display: flex; flex-direction: column; justify-content: space-between;">
-                                <div>
-                                    <h2><i class="fas fa-info-circle"></i> ${i18n.t('settings.about.title')}</h2>
-                                    
-                                    <div class="info-row">
-                                        <span>${i18n.t('settings.about.version')}</span>
-                                        <span>v${appVersion}</span>
-                                    </div>
-                                    <div class="info-row">
-                                        <span>配置版本</span>
-                                        <span>${configVersion}</span>
-                                    </div>
-                                </div>
-                                
-                                <div class="about-buttons" style="margin-top: 20px;">
-                                    <button class="control-btn ripple" id="more-info-btn" style="width: 100%;">
-                                        <i class="fas fa-book-open"></i> ${i18n.t('settings.about.moreInfo')}
-                                    </button>
-                                </div>
-                            </div>
-                            
-                        </div> </div> </div>
+                        </div>
+                        <div class="setting-island">
+                            <h2>软件信息</h2>
+                            <div class="setting-row-island"><span>客户端版本</span><span style="font-family:monospace;">v${appVersion}</span></div>
+                            <div class="setting-row-island"><span>配置版本</span><span style="font-family:monospace;">${configVersion}</span></div>
+                            <button class="control-btn ripple" id="more-info-btn" style="width:100%; margin-top:20px;">查看详细环境参数</button>
+                        </div>
+                    </div>
+                </div>
             </div>
-            ${langOptionsHtml} `;
-        
-        // [问题 2 修复] 将 options 元素移动到 body
+            ${langOptionsHtml}
+            ${fontOptionsHtml}
+            `;
+
         const langOptionsEl = document.getElementById('dd-options-lang-select-wrapper');
-        if (langOptionsEl) {
-            document.body.appendChild(langOptionsEl);
-        }
-            
+        if (langOptionsEl) document.body.appendChild(langOptionsEl);
+        const fontOptionsEl = document.getElementById('dd-options-font-select');
+        if (fontOptionsEl) document.body.appendChild(fontOptionsEl);
+        if (!document.getElementById('font-download-modal')) document.body.insertAdjacentHTML('beforeend', fontModalHtml);
+
         this.bindSettingsPageEvents();
+        // [修复] 延时渲染，确保 DOM 插入完成
+        setTimeout(() => {
+            this.renderTrafficChart();
+            this.renderUpdateUI('idle', { currentVersion: appVersion });
+        }, 150);
+    }
+
+    renderUpdateUI(state, data = {}) {
+        const container = document.getElementById('update-state-container');
+        if (!container) return;
+
+        let html = '';
+        let containerClass = `update-status-container update-state-${state}`;
+
+        switch (state) {
+            case 'idle':
+                html = `
+                    <div class="${containerClass}">
+                        <div class="update-icon-island"><i class="fas fa-cube"></i></div>
+                        <div class="update-title">更新管理</div>
+                        <div class="update-desc">当前版本: v${data.currentVersion}<br>点击下方按钮检查是否有新版本发布。</div>
+                        <button id="update-check-btn" class="action-btn ripple" style="padding: 12px 40px;"><i class="fas fa-sync-alt"></i> 检查更新</button>
+                    </div>`;
+                break;
+            
+            case 'checking':
+                html = `
+                    <div class="${containerClass}">
+                        <div class="update-icon-island"><i class="fas fa-circle-notch"></i></div>
+                        <div class="update-title">正在检查...</div>
+                        <div class="update-desc">正在连接服务器获取最新版本信息，请稍候。</div>
+                    </div>`;
+                break;
+
+            case 'latest':
+                html = `
+                    <div class="${containerClass}">
+                        <div class="update-icon-island"><i class="fas fa-check"></i></div>
+                        <div class="update-title">已是最新版本</div>
+                        <div class="update-desc">您当前运行的是 v${data.currentVersion}。<br>系统运行在最佳状态。</div>
+                        <button id="update-recheck-btn" class="control-btn ripple">再次检查</button>
+                    </div>`;
+                break;
+
+            case 'available':
+                const notes = Object.entries(data.updateNotes || {}).map(([k, v]) => `<b>${k}</b><br>${parseMarkdown(v)}`).join('<br><br>');
+                html = `
+                    <div class="${containerClass}">
+                        <div class="update-icon-island"><i class="fas fa-rocket"></i></div>
+                        <div class="update-title">发现新版本 v${data.remoteVersion}</div>
+                        <div class="update-desc" style="text-align: left; background: rgba(var(--bg-color-rgb), 0.5); padding: 15px; border-radius: 12px; width: 100%; max-height: 200px; overflow-y: auto;">
+                            ${notes || '暂无更新日志'}
+                        </div>
+                        <div class="update-actions-island">
+                            <button id="update-dl-pkg-btn" class="control-btn ripple">仅下载包</button>
+                            <button id="update-install-btn" class="action-btn ripple">立即更新</button>
+                        </div>
+                    </div>`;
+                break;
+
+            case 'downloading':
+                html = `
+                    <div class="${containerClass}">
+                        <div class="download-island-container">
+                            <div class="download-header">
+                                <span><i class="fas fa-cloud-download-alt"></i> 正在下载 v${data.remoteVersion}</span>
+                                <span id="dl-percent-text">0%</span>
+                            </div>
+                            <div class="liquid-progress-track">
+                                <div id="dl-progress-bar" class="liquid-progress-bar"></div>
+                            </div>
+                            <div class="download-meta">
+                                <span id="dl-speed-text">0 KB/s</span>
+                                <span id="dl-status-text">初始化连接...</span>
+                            </div>
+                            <button id="update-cancel-btn" class="control-btn mini-btn ripple error-btn" style="margin-top: 15px; width: 100%;">取消下载</button>
+                        </div>
+                    </div>`;
+                break;
+        }
+
+        container.innerHTML = html;
+
+        if (state === 'idle' || state === 'latest') {
+            const btn = document.getElementById(state === 'idle' ? 'update-check-btn' : 'update-recheck-btn');
+            btn?.addEventListener('click', () => this.performUpdateCheck());
+        } else if (state === 'available') {
+            document.getElementById('update-dl-pkg-btn').addEventListener('click', () => this.startUpdateDownload(data, false));
+            document.getElementById('update-install-btn').addEventListener('click', () => this.startUpdateDownload(data, true));
+        } else if (state === 'downloading') {
+            document.getElementById('update-cancel-btn').addEventListener('click', () => window.electronAPI.cancelDownload());
+        }
+    }
+
+    async performUpdateCheck() {
+        if (this.isDownloadingUpdate) return;
+        this.renderUpdateUI('checking');
+        
+        try {
+            const result = await window.electronAPI.checkUpdates();
+            setTimeout(() => {
+                if (result.hasUpdate) {
+                    this.renderUpdateUI('available', result);
+                } else {
+                    this.renderUpdateUI('latest', { currentVersion: result.currentVersion });
+                }
+            }, 800);
+        } catch (error) {
+            uiManager.showNotification('检查失败', error.message, 'error');
+            this.renderUpdateUI('idle', { currentVersion: 'Unknown' });
+        }
+    }
+
+    async startUpdateDownload(updateInfo, installAfter) {
+        this.isDownloadingUpdate = true;
+        this.renderUpdateUI('downloading', updateInfo);
+        
+        try {
+            const result = await window.electronAPI.downloadUpdate(updateInfo.downloadUrl);
+            if (result.success) {
+                if (installAfter) {
+                    document.getElementById('dl-status-text').textContent = '下载完成，正在启动安装...';
+                    setTimeout(() => window.electronAPI.installUpdate(result.path), 1000);
+                } else {
+                    window.electronAPI.showItemInFolder(result.path);
+                    this.renderUpdateUI('idle', { currentVersion: updateInfo.currentVersion }); 
+                }
+            }
+        } catch (error) {
+            uiManager.showNotification('下载失败', error.error, 'error');
+            this.renderUpdateUI('available', updateInfo);
+        } finally {
+            this.isDownloadingUpdate = false;
+        }
     }
 
     bindSettingsPageEvents() {
@@ -778,7 +1040,6 @@ class MainPage {
         if (this.settingsIntervalHeavy) clearInterval(this.settingsIntervalHeavy);
 
         const updateLightStats = async () => {
-            // ... (此函数内容保持不变) ...
             try {
                 const [stats, mem] = await Promise.all([
                     window.electronAPI.getRealtimeStats(),
@@ -795,430 +1056,130 @@ class MainPage {
                 const uptimeText = document.getElementById('app-uptime-text');
                 if (uptimeText) uptimeText.textContent = stats.uptime;
             } catch (error) {
-                console.error("无法更新轻量级状态:", error);
                 if (this.settingsInterval) clearInterval(this.settingsInterval);
             }
         };
 
-        const updateHeavyStats = async () => {
-            // ... (此函数内容保持不变) ...
-            try {
-                const gpuStats = await window.electronAPI.getGpuStats();
-                const gpuContainer = document.getElementById('gpu-stats-container');
-                if (gpuContainer) {
-                    if (gpuStats && gpuStats.length > 0) {
-                        if (gpuContainer.children.length !== gpuStats.length) {
-                            let gpuHtml = '';
-                            gpuStats.forEach((gpu, index) => {
-                                gpuHtml += `
-                            <div class="status-item" data-gpu-index="${index}">
-                                <div class="status-label">
-                                    <span>${i18n.t('settings.status.gpu')} ${index} (${gpu.vendor || 'N/A'})</span>
-                                    <span class="gpu-temp">${gpu.temperature ?? 'N/A'}${gpu.temperature ? '°C' : ''}</span>
-                                </div>
-                                <div class="status-label">
-                                    <span style="font-size: 11px; color: var(--text-secondary);">${gpu.model}</span>
-                                    <span class="gpu-load">${(gpu.load ?? 0).toFixed(1)}%</span>
-                                </div>
-                                <div class="status-bar-container"><div class="status-bar gpu-bar" style="width: ${gpu.load ?? 0}%;"></div></div>
-                            </div>
-                        `;
-                            });
-                            gpuContainer.innerHTML = gpuHtml;
-                        }
-                        else {
-                            gpuStats.forEach((gpu, index) => {
-                                const gpuItem = gpuContainer.querySelector(`[data-gpu-index="${index}"]`);
-                                if (gpuItem) {
-                                    const tempEl = gpuItem.querySelector('.gpu-temp');
-                                    const loadEl = gpuItem.querySelector('.gpu-load');
-                                    const barEl = gpuItem.querySelector('.gpu-bar');
-                                    if (tempEl) tempEl.textContent = `${gpu.temperature ?? 'N/A'}${gpu.temperature ? '°C' : ''}`;
-                                    if (loadEl) loadEl.textContent = `${(gpu.load ?? 0).toFixed(1)}%`;
-                                    if (barEl) barEl.style.width = `${gpu.load ?? 0}%`;
-                                }
-                            });
-                        }
-                    }
-                    else { gpuContainer.innerHTML = ''; }
-                }
-            } catch (error) {
-                console.error("无法更新重量级(GPU)状态:", error);
-                if (this.settingsIntervalHeavy) clearInterval(this.settingsIntervalHeavy);
-            }
-        };
-
         this.settingsInterval = setInterval(updateLightStats, 2000);
-        this.settingsIntervalHeavy = setInterval(updateHeavyStats, 10000);
         updateLightStats();
-        updateHeavyStats();
 
-        const navItems = document.querySelectorAll('.settings-nav-item');
-        const panels = document.querySelectorAll('.settings-panel');
+        const navItems = document.querySelectorAll('.island-nav-item');
+        
         navItems.forEach(item => {
             item.addEventListener('click', () => {
-                navItems.forEach(nav => nav.classList.remove('active'));
-                panels.forEach(panel => panel.classList.remove('active'));
+                const targetId = item.dataset.panel + '-panel';
+                const targetPanel = document.getElementById(targetId);
+                const currentPanel = document.querySelector('.settings-panel.active');
+
+                if (currentPanel === targetPanel) return;
+
+                navItems.forEach(n => n.classList.remove('active'));
                 item.classList.add('active');
-                const panelId = item.dataset.panel + '-panel';
-                document.getElementById(panelId)?.classList.add('active');
+
+                if (currentPanel) {
+                    currentPanel.classList.add('panel-exit');
+                    currentPanel.classList.remove('active');
+                    setTimeout(() => {
+                        currentPanel.classList.remove('panel-exit');
+                    }, 300);
+                }
+
+                if (targetPanel) {
+                    void targetPanel.offsetWidth; 
+                    targetPanel.classList.add('active');
+                }
             });
         });
-        
-        // --- [问题 2 修复] 绑定语言下拉菜单事件 (新逻辑) ---
-        const langWrapper = document.getElementById('dd-wrapper-lang-select-wrapper');
-        const langOptionsEl = document.getElementById('dd-options-lang-select-wrapper');
-        
-        if (langWrapper && langOptionsEl) {
-            const langTrigger = langWrapper.querySelector('.custom-select-trigger');
-            const langValueEl = langWrapper.querySelector('.custom-select-value');
 
-            langTrigger.addEventListener('click', (e) => {
-                e.stopPropagation();
+        uiManager.setupAdaptiveDropdown('dd-wrapper-lang-select-wrapper', 'dd-options-lang-select-wrapper',
+            async (value) => {
+                uiManager.showNotification(i18n.t('common.notification.title.info'), '正在保存语言设置并重启...', 'info');
+                try { await window.electronAPI.saveLanguageConfig(value); } catch (err) { uiManager.showNotification(i18n.t('common.notification.title.error'), err.message, 'error'); }
+            }
+        );
 
-                // 关闭所有其他打开的下拉菜单
-                document.querySelectorAll('.custom-select-options.dynamic-active').forEach(openDropdown => {
-                    if (openDropdown !== langOptionsEl) {
-                        openDropdown.classList.remove('dynamic-active');
-                    }
-                });
-                
-                // 计算位置
-                const rect = langTrigger.getBoundingClientRect();
-                const optionsHeight = langOptionsEl.offsetHeight;
-                const windowHeight = window.innerHeight;
+        uiManager.setupAdaptiveDropdown('dd-wrapper-font-select', 'dd-options-font-select',
+            async (value, text, dataset, triggerElement) => {
+                const fontUrl = dataset.url;
+                const modal = document.getElementById('font-download-modal');
+                const statusText = document.getElementById('font-download-status');
+                const progressBar = document.getElementById('font-download-bar');
+                const percentText = document.getElementById('font-download-percent');
 
-                // 检查是否在底部溢出 (上拉)
-                if (rect.bottom + optionsHeight + 5 > windowHeight && rect.top > optionsHeight + 5) {
-                    langOptionsEl.style.top = `${rect.top - optionsHeight - 5}px`;
-                    langOptionsEl.style.bottom = 'auto';
-                    langOptionsEl.style.transformOrigin = 'bottom center'; // [新增 修复动画]
-                } else {
-                // 默认向下
-                    langOptionsEl.style.top = `${rect.bottom + 5}px`;
-                    langOptionsEl.style.bottom = 'auto';
-                    langOptionsEl.style.transformOrigin = 'top center'; // [新增 修复动画]
+                if (value === 'Default') {
+                    this.dbSettings.customFontName = '';
+                    this.dbSettings.customFontPath = '';
+                    configManager.applyAppSettings({ customFontFamily: false });
+                    await window.electronAPI.saveMedia({ type: 'config_font', name: '', path: '' });
+                    uiManager.showNotification('设置成功', '已恢复系统默认字体');
+                    triggerElement.innerHTML = `<span class="custom-select-value">系统默认 (Default)</span><i class="fas fa-chevron-down custom-select-arrow"></i>`;
+                    return;
                 }
-                
-                langOptionsEl.style.left = `${rect.left}px`;
-                langOptionsEl.style.width = `${rect.width}px`;
-                
-                langOptionsEl.classList.toggle('dynamic-active');
-            });
 
-            langOptionsEl.querySelectorAll('.custom-select-option').forEach(option => {
-                option.addEventListener('click', async () => {
-                    const newValue = option.dataset.value;
-                    const newLabel = option.textContent;
-                    
-                    langValueEl.textContent = newLabel;
-                    langOptionsEl.classList.remove('dynamic-active');
-                    
-                    // 异步保存并触发重启
+                triggerElement.innerHTML = `<span class="custom-select-value">${text}</span><i class="fas fa-chevron-down custom-select-arrow"></i>`;
+                statusText.textContent = `正在准备下载 ${value}...`;
+                progressBar.style.width = '0%';
+                percentText.textContent = '0%';
+                modal.classList.add('active');
+
+                setTimeout(async () => {
+                    window.electronAPI.onFontDownloadProgress((data) => {
+                        const p = Math.round(data.percent);
+                        progressBar.style.width = `${p}%`;
+                        percentText.textContent = `${p}%`;
+                        statusText.textContent = `下载中... ${configManager.formatBytes(data.received)} / ${configManager.formatBytes(data.total)}`;
+                    });
+
                     try {
-                        await window.electronAPI.saveLanguageConfig(newValue);
-                        uiManager.showNotification(i18n.t('common.notification.title.success'), i18n.t('settings.appearance.language.restartMsg'), 'success');
+                        const result = await window.electronAPI.downloadFont({ fontName: value, fontUrl });
+                        if (result.success) {
+                            progressBar.style.width = '100%';
+                            percentText.textContent = '100%';
+                            statusText.textContent = result.cached ? '字体已存在，验证通过' : '下载完成，正在应用...';
+                            this.dbSettings.customFontName = value;
+                            this.dbSettings.customFontPath = result.path;
+                            await window.electronAPI.saveMedia({ type: 'config_font', name: value, path: result.path });
+                            setTimeout(() => {
+                                modal.classList.remove('active');
+                                uiManager.showNotification('设置成功', '即将重启软件以应用字体...');
+                                setTimeout(() => window.electronAPI.relaunchApp(), 1000);
+                            }, 800);
+                        } else { throw new Error(result.error); }
                     } catch (err) {
-                        uiManager.showNotification(i18n.t('common.notification.title.error'), err.message, 'error');
-                    }
-                });
-            });
-        }
-        
-        // --- [修复结束] ---
+                        modal.classList.remove('active');
+                        uiManager.showNotification('字体设置失败', err.message, 'error');
+                    } 
+                }, 500);
+            }
+        );
 
         document.getElementById('theme-switch-input')?.addEventListener('change', () => this.toggleTheme());
         
-        const aboutNavButton = document.querySelector('.settings-nav-item[data-panel="about"]');
-        if (aboutNavButton) {
-            aboutNavButton.addEventListener('contextmenu', (e) => {
-                e.preventDefault();
-                this.handleSecretTrigger(false);
-            });
-        }
-        
-        // [核心修改 2/3]：更新 'more-info-btn' 的点击事件
+        const aboutNavButton = document.querySelector('.island-nav-item[data-panel="about"]');
+        if (aboutNavButton) aboutNavButton.addEventListener('contextmenu', (e) => { e.preventDefault(); this.handleSecretTrigger(false); });
+
         document.getElementById('more-info-btn')?.addEventListener('click', () => {
             const currentTheme = document.body.getAttribute('data-theme') || 'dark';
-            // 从 configManager 获取缓存的版本信息并传递
             const versions = configManager.config?.dbSettings?.versions || {};
             window.electronAPI.openAcknowledgementsWindow(currentTheme, versions);
         });
 
-        // [修改] 更新作者链接
         document.getElementById('author-website-btn')?.addEventListener('click', () => window.electronAPI.openExternalLink('https://blog.ymhut.cn'));
         document.getElementById('feedback-btn')?.addEventListener('click', () => window.electronAPI.openExternalLink('mailto:admin@ymhut.cn'));
-        
-        // [修改] 移除了 'suyan-api-link' 和 'uapipro-link' 的事件监听器
-        
-        document.getElementById('select-bg-btn')?.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            const result = await window.electronAPI.selectBackgroundImage();
-            if (result.success) {
-                configManager.logAction('设置新的自定义背景图片', 'settings');
-                this.dbSettings.backgroundImage = result.path;
-                document.getElementById('background-layer').style.backgroundImage = `url('${result.path}')`;
-                this.toggleOpacityControls(true);
-                document.getElementById('custom-bg-trigger')?.classList.add('expanded');
-                document.querySelector('.collapsible-content')?.classList.add('expanded');
-                uiManager.showNotification(i18n.t('common.notification.title.success'), '背景图片已设置');
-            }
-        });
-        
-        document.getElementById('clear-bg-btn')?.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            configManager.logAction('清除了自定义背景图片', 'settings');
-            await window.electronAPI.clearBackgroundImage();
-            this.dbSettings.backgroundImage = '';
-            document.getElementById('background-layer').style.backgroundImage = 'none';
-            const root = document.documentElement;
-            const bgOpacitySlider = document.getElementById('opacity-slider');
-            const cardOpacitySlider = document.getElementById('card-opacity-slider');
-            root.style.setProperty('--background-opacity', '1.0');
-            root.style.setProperty('--navbar-opacity', '1.0');
-            root.style.setProperty('--card-opacity', '1.0');
-            window.electronAPI.setBackgroundOpacity(1.0);
-            window.electronAPI.setCardOpacity(1.0);
-            if (bgOpacitySlider) {
-                bgOpacitySlider.value = '1';
-                document.getElementById('opacity-value').textContent = '100%';
-            }
-            if (cardOpacitySlider) {
-                cardOpacitySlider.value = '1';
-                document.getElementById('card-opacity-value').textContent = '100%';
-            }
-            this.toggleOpacityControls(false);
-            document.getElementById('custom-bg-trigger')?.classList.remove('expanded');
-            document.querySelector('.collapsible-content')?.classList.remove('expanded');
-            uiManager.showNotification(i18n.t('common.notification.title.success'), '背景图片已清除');
-        });
-        
-        const bgTrigger = document.getElementById('custom-bg-trigger');
-        bgTrigger?.addEventListener('click', () => {
-            const content = bgTrigger.nextElementSibling;
-            bgTrigger.classList.toggle('expanded');
-            content?.classList.toggle('expanded');
-        });
-        
-        const bgOpacitySlider = document.getElementById('opacity-slider');
-        bgOpacitySlider?.addEventListener('input', (e) => {
-            const opacity = e.target.value;
-            document.documentElement.style.setProperty('--background-opacity', opacity);
-            document.documentElement.style.setProperty('--navbar-opacity', 1 - (1 - opacity) / 2);
-            document.getElementById('opacity-value').textContent = `${Math.round(opacity * 100)}%`;
-        });
-        bgOpacitySlider?.addEventListener('change', (e) => {
-            const opacity = parseFloat(e.target.value);
-            configManager.logAction(`背景透明度调整为: ${Math.round(opacity * 100)}%`, 'settings');
-            window.electronAPI.setBackgroundOpacity(opacity);
-        });
-        
-        const cardOpacitySlider = document.getElementById('card-opacity-slider');
-        cardOpacitySlider?.addEventListener('input', (e) => {
-            document.documentElement.style.setProperty('--card-opacity', e.target.value);
-            document.getElementById('card-opacity-value').textContent = `${Math.round(e.target.value * 100)}%`;
-        });
-        cardOpacitySlider?.addEventListener('change', (e) => {
-            const opacity = parseFloat(e.target.value);
-            configManager.logAction(`卡片透明度调整为: ${Math.round(opacity * 100)}%`, 'settings');
-            window.electronAPI.setCardOpacity(opacity);
-        });
 
-        this.bindUpdateCheck();
-        
-        this.renderTrafficChart(); 
-        
-        // [核心修改 2/3]：移除了 renderAdditionalEnvInfo() 的调用
-    }
-    
-    async renderTrafficChart() {
-        if (this.activeChartInstance) {
-            this.activeChartInstance.destroy();
-            this.activeChartInstance = null;
-        }
-
-        const history = await window.electronAPI.getTrafficHistory();
-        if (!history || history.length === 0) {
-            const container = document.getElementById('traffic-chart-container');
-            if (container) container.innerHTML = `<div class="empty-logs-placeholder" style="padding: 40px 0;"><i class="fas fa-chart-line"></i><p>${i18n.t('settings.traffic.chart.empty.title')}</p><span>${i18n.t('settings.traffic.chart.empty.sub')}</span></div>`;
-            return;
-        };
-
-        const ctx = document.getElementById('traffic-chart')?.getContext('2d');
-        if (!ctx) return;
-
-        const style = getComputedStyle(document.body);
-        const textColor = style.getPropertyValue('--text-color').trim();
-        const textSecondaryColor = style.getPropertyValue('--text-secondary').trim();
-        const borderColor = style.getPropertyValue('--border-color').trim();
-        const accentColorRGB = style.getPropertyValue('--accent-color-rgb').trim();
-        const primaryColorRGB = style.getPropertyValue('--primary-rgb').trim();
-        const successColor = style.getPropertyValue('--success-color').trim() || '#34c759';
-        
-        const gradient = ctx.createLinearGradient(0, 0, 0, 250);
-        gradient.addColorStop(0, `rgba(${accentColorRGB}, 0.4)`);
-        gradient.addColorStop(1, `rgba(${accentColorRGB}, 0)`);
-
-        const labels = history.map(item => item.log_date);
-        const dataPoints = history.map(item => (item.bytes_used / (1024 * 1024)).toFixed(2));
-
-        const allData = dataPoints;
-        const data14Days = labels.length > 14 ? [...new Array(labels.length - 14).fill(null), ...dataPoints.slice(-14)] : dataPoints;
-        const data7Days = labels.length > 7 ? [...new Array(labels.length - 7).fill(null), ...dataPoints.slice(-7)] : dataPoints;
-
-        this.activeChartInstance = new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: labels,
-                datasets: [
-                    {
-                        label: '全部流量 (MB)', data: allData, 
-                        borderColor: `rgba(${accentColorRGB}, 0.8)`, 
-                        backgroundColor: gradient,
-                        borderWidth: 2.5, tension: 0.4, fill: true,
-                        pointBackgroundColor: `rgba(${accentColorRGB}, 1)`,
-                        pointStyle: 'circle', pointRadius: 0, pointHoverRadius: 6,
-                    },
-                    {
-                        label: '近14天 (MB)', data: data14Days, 
-                        borderColor: `rgba(${primaryColorRGB}, 0.8)`,
-                        borderWidth: 2, tension: 0.4, fill: false,
-                        borderDash: [5, 5],
-                        pointBackgroundColor: `rgba(${primaryColorRGB}, 1)`,
-                        pointRadius: 0, pointHoverRadius: 6,
-                    },
-                    {
-                        label: '近7天 (MB)', data: data7Days, 
-                        borderColor: successColor,
-                        borderWidth: 2, tension: 0.4, fill: false,
-                        borderDash: [3, 3],
-                        pointBackgroundColor: successColor,
-                        pointRadius: 0, pointHoverRadius: 6,
-                    }
-                ]
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                layout: { padding: { left: 10, right: 15 } },
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        ticks: { color: textSecondaryColor, font: { family: "var(--font-family)" } },
-                        grid: { color: borderColor, drawBorder: false }
-                    },
-                    x: {
-                        ticks: { color: textSecondaryColor, font: { family: "var(--font-family)" } },
-                        grid: { display: false, drawBorder: false }
-                    }
-                },
-                plugins: {
-                    legend: {
-                        labels: { color: textColor, font: { family: "var(--font-family)", size: 13 }, usePointStyle: true, boxWidth: 8, }
-                    },
-                    tooltip: {
-                        enabled: true, backgroundColor: 'rgba(var(--card-background-rgb), 0.9)', titleColor: textColor,
-                        bodyColor: textSecondaryColor, borderColor: borderColor, borderWidth: 1, cornerRadius: 8,
-                        padding: 10, displayColors: true, boxPadding: 4,
-                        titleFont: { family: "var(--font-family)", weight: 'bold' },
-                        bodyFont: { family: "var(--font-family)" }
-                    }
-                },
-                interaction: { intersect: false, mode: 'index' },
-            }
-        });
-    }
-
-    toggleOpacityControls(enabled) {
-        const slider1 = document.getElementById('opacity-slider');
-        const slider2 = document.getElementById('card-opacity-slider');
-        if (slider1) slider1.disabled = !enabled;
-        if (slider2) slider2.disabled = !enabled;
-    }
-
-    async toggleTheme() {
-        const newTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-        configManager.logAction(`主题切换为: ${newTheme === 'dark' ? '黑夜模式' : '白天模式'}`, 'settings');
-        document.body.setAttribute('data-theme', newTheme);
-        this.dbSettings.theme = newTheme;
-        document.querySelector('#theme-toggle i').className = newTheme === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
-        if (document.getElementById('theme-switch-input')) document.getElementById('theme-switch-input').checked = newTheme === 'dark';
-        await window.electronAPI.setTheme(newTheme);
-
-        if (document.getElementById('traffic-chart')) {
-            this.renderTrafficChart();
-        }
-    }
-
-    bindThemeToggle() {
-        const themeToggle = document.getElementById('theme-toggle');
-        themeToggle.querySelector('i').className = document.body.getAttribute('data-theme') === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
-        themeToggle.addEventListener('click', () => this.toggleTheme());
-    }
-
-    bindUpdateCheck() {
-        const checkBtn = document.getElementById('update-button');
-        const updateInfoEl = document.getElementById('update-info-container');
-        if (!checkBtn) return;
-        checkBtn.addEventListener('click', async () => {
-            if (this.isDownloadingUpdate) return;
-            checkBtn.disabled = true; checkBtn.classList.add('checking'); checkBtn.querySelector('.text').textContent = i18n.t('settings.update.checking');
-            updateInfoEl.innerHTML = '';
-            try {
-                const result = await window.electronAPI.checkUpdates();
-                if (result.hasUpdate) {
-                    updateInfoEl.innerHTML = this.getUpdateAvailableHTML(result);
-                    document.getElementById('download-only-btn').addEventListener('click', () => this.startUpdateDownload(result, false));
-                    document.getElementById('download-and-install-btn').addEventListener('click', () => this.startUpdateDownload(result, true));
-                } else {
-                    updateInfoEl.innerHTML = `<p class="success">当前已是最新版本 (${result.currentVersion})</p>`;
-                }
-            } catch (error) {
-                updateInfoEl.innerHTML = `<p class="error">检查更新失败: ${error.message}</p>`;
-            } finally {
-                checkBtn.disabled = false; checkBtn.classList.remove('checking'); checkBtn.querySelector('.text').textContent = i18n.t('settings.update.checkBtn');
-            }
-        });
-    }
-
-    getUpdateAvailableHTML(result) {
-        const notesHtml = Object.entries(result.updateNotes).map(([key, value]) => `<div class="update-note-item"><span class="note-key">${key}:</span><span class="note-value">${value.replace(/<br>/g, '<br/>')}</div>`).join('');
-        return `<p class="accent" style="text-align:center;">发现新版本: ${result.remoteVersion}</p><div class="update-notes-container"><div class="update-notes-list">${notesHtml}</div></div><div class="update-actions"><button id="download-only-btn" class="control-btn ripple"><i class="fas fa-download"></i> 下载安装包</button><button id="download-and-install-btn" class="action-btn ripple"><i class="fas fa-bolt"></i> 下载并安装</button></div>`;
-    }
-
-    getUpdateDownloadHTML(version) {
-        return `<div class="update-download-ui"><div class="version-tag">正在下载 v${version}</div><div class="status-text"><span id="download-status-text">正在初始化...</span><span id="download-speed-text">0 KB/s</span></div><div class="download-progress-bar-container"><div id="download-progress-bar" class="download-progress-bar" style="width: 0%;"></div></div><div class="download-controls"><button id="cancel-download-btn" class="action-btn error-btn ripple"><i class="fas fa-stop-circle"></i> 取消下载</button></div></div>`;
-    }
-
-    async startUpdateDownload(updateInfo, installAfterDownload) {
-        this.isDownloadingUpdate = true;
-        document.getElementById('update-info-container').innerHTML = this.getUpdateDownloadHTML(updateInfo.remoteVersion);
-        document.getElementById('cancel-download-btn').addEventListener('click', () => window.electronAPI.cancelDownload());
-        try {
-            const result = await window.electronAPI.downloadUpdate(updateInfo.downloadUrl);
-            if (result.success) {
-                if (installAfterDownload) {
-                    window.electronAPI.openFile(result.path);
-                } else {
-                    const controls = document.querySelector('.download-controls');
-                    controls.innerHTML = `<button id="open-folder-btn" class="action-btn ripple"><i class="fas fa-folder-open"></i> 打开位置</button>`;
-                    document.getElementById('open-folder-btn').addEventListener('click', () => window.electronAPI.showItemInFolder(result.path));
-                }
-            }
-        } catch (error) {
-            document.getElementById('download-status-text').textContent = `下载失败: ${error.error}`;
-        } finally {
-            this.isDownloadingUpdate = false;
-        }
+        this.renderTrafficChart();
     }
 
     listenForDownloadProgress() {
-        window.electronAPI.onDownloadProgress(progress => {
-            const bar = document.getElementById('download-progress-bar');
-            if (bar) bar.style.width = `${progress.percent}%`;
-            const status = document.getElementById('download-status-text');
-            if (status) status.textContent = `正在下载... (${Math.round(progress.percent)}%)`;
-            const speed = document.getElementById('download-speed-text');
-            if (speed) speed.textContent = configManager.formatBytes(progress.speed || 0) + '/s';
+        window.electronAPI.onDownloadProgress(p => {
+            const bar = document.getElementById('dl-progress-bar');
+            const percent = document.getElementById('dl-percent-text');
+            const speed = document.getElementById('dl-speed-text');
+            if (bar && percent) {
+                bar.style.width = `${p.percent}%`;
+                percent.textContent = `${Math.round(p.percent)}%`;
+                if(speed) speed.textContent = configManager.formatBytes(p.speed || 0) + '/s';
+            }
         });
     }
 
@@ -1233,13 +1194,12 @@ class MainPage {
         this.navigateTo('settings', 'update');
         this.updateActiveNavButton(document.getElementById('settings-btn'));
         setTimeout(() => {
-            const updateButton = document.getElementById('update-button');
-            if (updateButton) {
-                if (!updateButton.classList.contains('checking')) {
-                    updateButton.click();
-                }
+            const container = document.getElementById('update-state-container');
+            if (container && container.querySelector('.update-state-idle')) {
+                const btn = document.getElementById('update-check-btn');
+                if(btn) btn.click();
             }
-        }, 300);
+        }, 500);
     }
 
     addRippleEffectListener() {
@@ -1260,7 +1220,98 @@ class MainPage {
             }
         });
     }
+
+    async renderTrafficChart() {
+        if (this.activeChartInstance) { this.activeChartInstance.destroy(); this.activeChartInstance = null; }
+        const history = await window.electronAPI.getTrafficHistory();
+        const labels = [], dataPoints = [], today = new Date();
+
+        for (let i = 13; i >= 0; i--) {
+            const d = new Date(); d.setDate(today.getDate() - i);
+            const dateStr = d.toISOString().split('T')[0];
+            const record = history ? history.find(h => h.log_date === dateStr) : null;
+            labels.push(dateStr.substring(5));
+            dataPoints.push(((record ? record.bytes_used : 0) / (1024 * 1024)).toFixed(2));
+        }
+
+        const ctx = document.getElementById('traffic-chart')?.getContext('2d');
+        if (!ctx) return;
+
+        const style = getComputedStyle(document.documentElement); 
+        const currentFontFamily = style.getPropertyValue('--font-family').trim() || "sans-serif";
+        const primaryColorRGB = style.getPropertyValue('--primary-rgb').trim();
+        const textColor = style.getPropertyValue('--text-color').trim();
+        const borderColor = style.getPropertyValue('--border-color').trim();
+
+        const gradient = ctx.createLinearGradient(0, 0, 0, 250);
+        gradient.addColorStop(0, `rgba(${primaryColorRGB}, 0.5)`);
+        gradient.addColorStop(1, `rgba(${primaryColorRGB}, 0.05)`);
+
+        this.activeChartInstance = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: '每日流量 (MB)',
+                    data: dataPoints,
+                    borderColor: `rgba(${primaryColorRGB}, 1)`,
+                    backgroundColor: gradient,
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.4,
+                    pointBackgroundColor: `rgba(${primaryColorRGB}, 1)`,
+                    pointRadius: 3,
+                    pointHoverRadius: 6
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        backgroundColor: 'rgba(0,0,0,0.8)',
+                        titleColor: '#fff',
+                        titleFont: { family: currentFontFamily, weight: 'bold' },
+                        bodyFont: { family: currentFontFamily },
+                        callbacks: { label: (ctx) => ` ${ctx.parsed.y} MB` }
+                    }
+                },
+                scales: {
+                    y: { beginAtZero: true, grid: { color: borderColor, borderDash: [5, 5] }, ticks: { color: textColor, font: { size: 10, family: currentFontFamily } }, title: { display: true, text: '每日使用量 (MB)', color: textColor, font: { family: currentFontFamily } } },
+                    x: { grid: { display: false }, ticks: { color: textColor, font: { size: 10, family: currentFontFamily } } }
+                },
+                interaction: { mode: 'nearest', axis: 'x', intersect: false }
+            }
+        });
+    }
+
+    toggleOpacityControls(enabled) {} 
+
+    async toggleTheme() {
+        const newTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        configManager.logAction(`主题切换为: ${newTheme === 'dark' ? '黑夜模式' : '白天模式'}`, 'settings');
+        document.body.setAttribute('data-theme', newTheme);
+        this.dbSettings.theme = newTheme;
+        document.querySelector('#theme-toggle i').className = newTheme === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
+        if (document.getElementById('theme-switch-input')) document.getElementById('theme-switch-input').checked = newTheme === 'dark';
+        await window.electronAPI.setTheme(newTheme);
+        if (document.getElementById('traffic-chart')) this.renderTrafficChart();
+    }
+
+    bindThemeToggle() {
+        const themeToggle = document.getElementById('theme-toggle');
+        themeToggle.querySelector('i').className = document.body.getAttribute('data-theme') === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
+        themeToggle.addEventListener('click', () => this.toggleTheme());
+    }
 }
 
 const mainPageInstance = new MainPage();
 window.mainPage = mainPageInstance;
+
+// [修复] 确保 DOM 加载后再启动初始化，防止白屏
+document.addEventListener('DOMContentLoaded', () => {
+    mainPageInstance.init();
+});

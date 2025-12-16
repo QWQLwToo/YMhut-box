@@ -1,4 +1,3 @@
-
 // preload.js
 const { contextBridge, ipcRenderer } = require('electron');
 
@@ -9,6 +8,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     
     onInitialData: (callback) => ipcRenderer.on('initial-data', (_event, value) => callback(value)),
 
+    // [新增] 字体下载进度监听
+    onFontDownloadProgress: (callback) => ipcRenderer.on('font-download-progress', (_event, value) => callback(value)),
     getLanguageConfig: () => ipcRenderer.invoke('get-language-config'),
     saveLanguageConfig: (lang) => ipcRenderer.invoke('save-language-config', lang),
     requestAdminRelaunch: () => ipcRenderer.invoke('check-and-relaunch-as-admin'),
@@ -40,6 +41,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     cancelDownload: () => ipcRenderer.invoke('cancel-download'),
     onDownloadProgress: (callback) => ipcRenderer.on('download-progress', (_event, value) => callback(value)),
     onNetworkSpeedUpdate: (callback) => ipcRenderer.on('network-speed-update', (_event, value) => callback(value)),
+    
+    // [新增] 安装更新接口
+    installUpdate: (filePath) => ipcRenderer.invoke('install-update', filePath),
+
     openFile: (filePath) => ipcRenderer.invoke('open-file', filePath),
     showItemInFolder: (filePath) => ipcRenderer.invoke('show-item-in-folder', filePath),
     openExternalLink: (url) => ipcRenderer.invoke('open-external-link', url),
@@ -59,7 +64,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getGpuStats: () => ipcRenderer.invoke('get-gpu-stats'),
     getTrafficHistory: () => ipcRenderer.invoke('get-traffic-history'),
     
-    // [修复 1 & 2] 补充压缩工具所需的 API
+    getCachedIcon: (toolId, url) => ipcRenderer.invoke('get-cached-icon', toolId, url),
+    // [新增] 字体下载接口
+    downloadFont: (data) => ipcRenderer.invoke('download-font', data),
+
     compressFiles: (data) => ipcRenderer.invoke('compress-files', data),
     decompressFile: (data) => ipcRenderer.invoke('decompress-file', data),
     onArchiveProgress: (callback) => ipcRenderer.on('archive-progress', (_event, value) => callback(value)),
@@ -72,4 +80,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     resetSecretAttempts: () => ipcRenderer.invoke('reset-secret-attempts'),
     checkAndRelaunchAsAdmin: () => ipcRenderer.invoke('check-and-relaunch-as-admin'),
     requestNewWindow: (url, options) => ipcRenderer.send('request-new-window', url, options),
+    checkUserAgreement: () => ipcRenderer.invoke('check-user-agreement'),
+confirmUserAgreement: () => ipcRenderer.invoke('confirm-user-agreement'),
 });

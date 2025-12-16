@@ -1,6 +1,6 @@
 {
   "name": "ymhut-box",
-  "version": "1.4.13",
+  "version": "1.4.31",
   "description": "A multi-functional toolbox developed by YMHUT",
   "main": "main.js",
   "scripts": {
@@ -26,6 +26,8 @@
     "javascript-obfuscator": "^4.1.1"
   },
   "dependencies": {
+    "adm-zip": "^0.5.10",
+    "archiver": "^5.3.1",
     "better-sqlite3": "9.4.5",
     "iconv-lite": "^0.6.3",
     "ini": "^4.0.0",
@@ -57,7 +59,9 @@
       "node_modules/iconv-lite/**/*",
       "node_modules/sudo-prompt/**/*",
       "node_modules/systeminformation/**/*",
-      "node_modules/ini/**/*"
+      "node_modules/ini/**/*",
+      "node_modules/adm-zip/**/*",
+      "node_modules/archiver/**/*"
     ],
     "win": {
       "target": "nsis",
@@ -68,6 +72,7 @@
       "include": "build-scripts/installer.nsh",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "runAfterFinish": false,
       "installerIcon": "src/assets/icon.ico",
       "uninstallerIcon": "src/assets/icon.ico",
       "installerHeaderIcon": "src/assets/icon.ico",
@@ -85,7 +90,7 @@
       "icon": "src/assets/icon.png",
       "category": "Utility",
       "synopsis": "Toolbox by YMHUT",
-      "description": "A multi-functional toolbox developed by YMHUT, providing various practical tools"
+      "description": "A multi-functional toolbox developed by YMHUT"
     }
   }
 }

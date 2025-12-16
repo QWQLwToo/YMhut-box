@@ -1,3 +1,4 @@
+// src/js/tools/biliHotTool.js
 import BaseTool from '../baseTool.js';
 
 class BiliHotTool extends BaseTool {
@@ -60,10 +61,10 @@ class BiliHotTool extends BaseTool {
                 if (done) break;
                 chunks.push(value);
                 receivedLength += value.length;
-                window.electronAPI.reportTraffic(value.length); // 实时上报
+                window.electronAPI.reportTraffic(value.length);
             }
 
-            await window.electronAPI.addTraffic(receivedLength); // 最终统计
+            await window.electronAPI.addTraffic(receivedLength);
 
             const blob = new Blob(chunks);
             const data = await blob.text();
@@ -89,28 +90,28 @@ class BiliHotTool extends BaseTool {
         const tableRows = items.map(item => {
             const parts = item.split('±img=');
             const titlePart = parts[0];
-            const imageUrl = parts[1] ? parts[1].trim() : null;
+            // 图片暂不显示，保持布局整洁
+            // const imageUrl = parts[1] ? parts[1].trim() : null;
 
-            // 正则表达式匹配中文冒号 "："
             const rankMatch = titlePart.match(/^(\d+)：/);
             const rank = rankMatch ? rankMatch[1] : '';
             const title = rankMatch ? titlePart.substring(rankMatch[0].length).trim() : titlePart.trim();
             const searchUrl = `https://search.bilibili.com/all?keyword=${encodeURIComponent(title)}`;
             
-            // 为前三名添加特殊样式类
             let rankClass = '';
             if (rank <= 3) {
                 rankClass = `rank-top-3 rank-${rank}`;
             }
 
+            // [UI 修复] 使用 hotboard-rank 和 hotboard-title-link 统一类名
+            // [逻辑修复] 将 data-link 放在 tr 上
             return `
-                <tr>
+                <tr data-link="${searchUrl}">
+                    <td style="width: 50px; text-align: center;">
+                        <span class="hotboard-rank ${rankClass}">${rank}</span>
+                    </td>
                     <td>
-                        <div class="bili-hot-item">
-                            <span class="bili-hot-rank ${rankClass}">${rank}</span>
-                            <a href="#" data-link="${searchUrl}" class="bili-hot-title">${title}</a>
-                            ${imageUrl ? `<img src="${imageUrl}" class="bili-hot-image" alt="热搜标签" onerror="this.style.display='none'"/>` : ''}
-                        </div>
+                        <span class="hotboard-title-link">${title}</span>
                     </td>
                 </tr>
             `;
@@ -120,7 +121,8 @@ class BiliHotTool extends BaseTool {
             <table class="bili-hot-table">
                 <thead>
                     <tr>
-                        <th>热搜标题</th>
+                        <th>排名</th>
+                        <th>标题</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -128,10 +130,18 @@ class BiliHotTool extends BaseTool {
                 </tbody>
             </table>`;
             
-        resultsContainer.querySelectorAll('a[data-link]').forEach(link => {
-            link.addEventListener('click', (e) => {
+        // [核心修复] 绑定行点击事件 + URL 安全校验
+        resultsContainer.querySelectorAll('tr[data-link]').forEach(row => {
+            row.addEventListener('click', (e) => {
                 e.preventDefault();
-                window.electronAPI.openExternalLink(e.currentTarget.dataset.link);
+                const url = row.dataset.link;
+                
+                // 只有合法的 HTTP/HTTPS 链接才打开
+                if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
+                    window.electronAPI.openExternalLink(url);
+                } else {
+                    this._notify('无法打开', '该条目没有有效的跳转链接', 'info');
+                }
             });
         });
     }
