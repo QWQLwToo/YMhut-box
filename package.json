@@ -1,13 +1,12 @@
 {
   "name": "ymhut-box",
-  "version": "1.4.31",
-  "description": "A multi-functional toolbox developed by YMHUT",
+  "version": "1.3.7",
+  "description": "YMhut开发的工具箱",
   "main": "main.js",
   "scripts": {
     "start:dev": "electron .",
-    "rebuild": "npx electron-rebuild -f -w better-sqlite3 --version 25.8.1",
-    "build": "npm run rebuild && node ./build-scripts/build.js",
-    "start": "npm run build && electron ./app_dist",
+    "build": "node ./build-scripts/build.js",
+    "start": "npm run build && cd app_dist && electron .",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux"
@@ -21,16 +20,12 @@
   "devDependencies": {
     "electron": "25.8.1",
     "electron-builder": "^24.13.3",
-    "electron-rebuild": "^3.2.9",
     "fs-extra": "^11.3.2",
     "javascript-obfuscator": "^4.1.1"
   },
   "dependencies": {
-    "adm-zip": "^0.5.10",
-    "archiver": "^5.3.1",
     "better-sqlite3": "9.4.5",
     "iconv-lite": "^0.6.3",
-    "ini": "^4.0.0",
     "sudo-prompt": "^9.2.1",
     "systeminformation": "^5.22.11"
   },
@@ -42,26 +37,13 @@
       "app": "app_dist",
       "output": "installer"
     },
-    "extraResources": [
-      {
-        "from": "./lang",
-        "to": "lang"
-      },
-      {
-        "from": "./build-scripts/config-template.ini",
-        "to": "config-template.ini"
-      }
-    ],
     "files": [
       "**/*",
       "!node_modules/*",
       "node_modules/better-sqlite3/**/*",
       "node_modules/iconv-lite/**/*",
       "node_modules/sudo-prompt/**/*",
-      "node_modules/systeminformation/**/*",
-      "node_modules/ini/**/*",
-      "node_modules/adm-zip/**/*",
-      "node_modules/archiver/**/*"
+      "node_modules/systeminformation/**/*"
     ],
     "win": {
       "target": "nsis",
@@ -72,14 +54,11 @@
       "include": "build-scripts/installer.nsh",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "runAfterFinish": false,
       "installerIcon": "src/assets/icon.ico",
       "uninstallerIcon": "src/assets/icon.ico",
       "installerHeaderIcon": "src/assets/icon.ico",
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "warningsAsErrors": false,
-      "unicode": true
+      "createStartMenuShortcut": true
     },
     "linux": {
       "target": [
@@ -89,8 +68,8 @@
       ],
       "icon": "src/assets/icon.png",
       "category": "Utility",
-      "synopsis": "Toolbox by YMHUT",
-      "description": "A multi-functional toolbox developed by YMHUT"
+      "synopsis": "YMhut开发的工具箱",
+      "description": "YMhut开发的多功能工具箱，提供各类实用工具"
     }
   }
 }

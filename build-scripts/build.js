@@ -29,7 +29,7 @@ const obfuscationOptions = {
     debugProtection: true,
     debugProtectionInterval: 4000,
     disableConsoleOutput: true,
-    identifierNamesGenerator: 'hexadecimal',
+    identifierNamesGenerator: 'hexadecimal', 
     log: false,
     numbersToExpressions: true,
     renameGlobals: false,
@@ -40,7 +40,7 @@ const obfuscationOptions = {
     selfDefending: false,
     simplify: true,
     stringArray: true,
-    stringArrayEncoding: ['base64'],
+    stringArrayEncoding: ['base64'], 
     stringArrayThreshold: 0.75,
     stringArrayRotate: true,
     stringArrayShuffle: true,
@@ -53,7 +53,6 @@ const obfuscationOptions = {
 // --- ⚙️ 构建脚本执行区 ---
 // ====================================================================================
 
-// 移除 'lang'（无需复制到 app_dist，从 build 目录读取）→ 注释说明保留，实际已补充 lang 复制逻辑
 const sourcesToProcess = [
     'main.js',
     'preload.js',
@@ -148,28 +147,6 @@ async function run() {
     };
     await fs.writeJson(path.join(outputDir, 'package.json'), prodPackageJson, { spaces: 2 });
     console.log('- 已清理并写入 package.json');
-    
-    // 👇 修复1：复制 lang 目录到 app_dist（解决语言文件找不到问题）
-    const langSrc = path.join(rootDir, 'lang');
-    const langDest = path.join(outputDir, 'lang');
-    if (await fs.pathExists(langSrc)) {
-        await fs.copy(langSrc, langDest);
-        console.log('- 已复制 lang 目录到 app_dist');
-    } else {
-        throw new Error(`❌ 找不到 lang 目录：${langSrc}`);
-    }
-
-    // 👇 修复2：恢复 config-template.ini 复制（解决配置模板缺失问题）
-    const configTemplatePath = path.join(rootDir, 'build-scripts', 'config-template.ini');
-    const configTemplateDest = path.join(outputDir, 'config-template.ini');
-    if (await fs.pathExists(configTemplatePath)) {
-        await fs.copy(configTemplatePath, configTemplateDest);
-        console.log('- 已复制 config-template.ini 到 app_dist');
-    } else {
-        throw new Error(`❌ 找不到 config-template.ini：${configTemplatePath}`);
-    }
-
-    // 原有源文件复制逻辑（main.js、preload.js、config、src 等）
     for (const source of sourcesToProcess) {
         const sourcePath = path.join(rootDir, source);
         const destPath = path.join(outputDir, source);
@@ -177,7 +154,6 @@ async function run() {
             await fs.copy(sourcePath, destPath);
         }
     }
-
     console.log('- 其他所有源文件已复制。');
 
     // --- [自动化核心] ---
@@ -186,34 +162,7 @@ async function run() {
     
     console.log('🔍 [4/6] 动态解析模块和工具类名...');
     obfuscationOptions.reservedNames = await getReservedNames();
-    
-    // --- [BUG 修复] 开始 ---
-    // 告诉混淆器保留 preload.js 导出的 API 名称，防止 mainPage.js 调用时因名称不匹配而失败
-    console.log('🛡️ [4.5/6] 注入 preload.js API 名称以防止混淆...');
-    const preloadApiNames = [
-        'onInitialData', // <--- 修复: TypeError: window[_0x...
-        'getLanguageConfig',
-        'saveLanguageConfig',
-        'requestAdminRelaunch',
-        // (为安全起见，添加所有在 preload.js 中定义的 API)
-        'runInitialization', 'onInitProgress', 'initializationComplete',
-        'minimizeWindow', 'maximizeWindow', 'closeWindow', 'relaunchApp',
-        'openAcknowledgementsWindow', 'closeCurrentWindow', 'openSecretWindow',
-        'openToolWindow', 'secretWindowMinimize', 'secretWindowMaximize',
-        'logAction', 'getLogs', 'clearLogs', 'getTrafficStats', 'addTraffic',
-        'reportTraffic', 'getAppVersion', 'checkUpdates', 'downloadUpdate',
-        'cancelDownload', 'onDownloadProgress', 'onNetworkSpeedUpdate',
-        'openFile', 'showItemInFolder', 'openExternalLink', 'saveMedia',
-        'setTheme', 'setGlobalVolume', 'selectBackgroundImage',
-        'clearBackgroundImage', 'setBackgroundOpacity', 'setCardOpacity',
-        'getSystemInfo', 'getMemoryUpdate', 'getRealtimeStats', 'getGpuStats',
-        'getTrafficHistory', 'launchSystemTool', 'showConfirmationDialog',
-        'checkSecretAccess', 'recordSecretFailure', 'resetSecretAttempts',
-        'checkAndRelaunchAsAdmin', 'requestNewWindow'
-    ];
-    obfuscationOptions.reservedNames.push(...preloadApiNames);
-    console.log(`- 已添加 ${preloadApiNames.length} 个 preload API 名称到保留列表。`);
-    // --- [修复结束] ---
+    // --- [自动化结束] ---
 
     console.log('🛡️ [5/6] 查找并混淆 JavaScript 文件...');
     const jsFilesToObfuscate = await findJsFiles(outputDir);

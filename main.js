@@ -10,282 +10,225 @@ const iconv = require('iconv-lite');
 const AppDatabase = require('./config/database');
 const si = require('systeminformation');
 const sudo = require('sudo-prompt');
-const ini = require('ini');
-const { Worker } = require('worker_threads');
 
-// --- [核心路径定义] ---
-const exeDir = path.dirname(process.execPath);
-const rootDir = app.isPackaged ? path.resolve(exeDir, '..') : __dirname;
-const langDir = app.isPackaged ? path.join(exeDir, 'lang') : path.join(__dirname, 'lang');
-const langDirFallback = app.isPackaged ? path.join(exeDir, 'resources', 'lang') : path.join(__dirname, 'lang');
+// --- [最终版] 数据库路径管理和迁移逻辑 ---
+
+// 全局数据库实例
+let db;
 
 function determineDataPath() {
+    // 开发环境下，数据仍在项目 config 目录中
     if (!app.isPackaged) {
-        return path.join(__dirname, 'config', 'app.db');
+        const devDbDir = path.join(__dirname, 'config');
+        if (!fs.existsSync(devDbDir)) fs.mkdirSync(devDbDir, { recursive: true });
+        return path.join(devDbDir, 'app.db');
     }
-    const dataDir = path.join(rootDir, 'data');
+
+    // 生产环境下，数据在安装目录的 data 文件夹中
+    const installDir = path.join(path.dirname(process.execPath), '..');
+    const dataDir = path.join(installDir, 'data');
     if (!fs.existsSync(dataDir)) {
-        try { fs.mkdirSync(dataDir, { recursive: true }); } catch (error) { }
+        try {
+            fs.mkdirSync(dataDir, { recursive: true });
+        } catch (error) {
+            dialog.showErrorBox('严重错误', `无法创建数据目录: ${dataDir}\n请检查权限或以管理员身份运行。`);
+            app.quit();
+        }
     }
+    
     return path.join(dataDir, 'app.db');
 }
 
-// --- 全局变量 ---
-let currentLanguagePack = {};
-let fallbackLanguagePack = {};
-let appConfig = { Settings: { Language: 'auto' } };
-let db;
-let mainWindow;
-let splashWindow;
-let disclaimerWindow;
-let downloadController = null;
-let windowStateChangeTimer = null;
-let acknowledgementsWindow = null;
-let toolWindows = new Map();
-const APP_VERSION = app.getVersion();
+async function migrateAndInitializeDatabase() { // <-- [修改] 声明为 async
+    // 1. 始终使用新的、正确的路径 (userData) 初始化主数据库实例
+    const newDataPath = determineDataPath();
+    db = new AppDatabase(newDataPath);
 
-// 缓存启动配置
-let pendingLaunchConfig = null;
+    // 2. 仅在生产环境中执行一次性的迁移检测
+    if (app.isPackaged) {
+        // [旧路径] 指向之前错误的安装目录相对路径
+        const oldInstallDir = path.join(path.dirname(process.execPath), '..');
+        const oldDataPath = path.join(oldInstallDir, 'data', 'app.db');
+        const migratedMarker = `${oldDataPath}.migrated_to_userdata`;
 
-const compressionWorkerPath = path.join(__dirname, 'src/js/workers/compressionWorker.js');
+        let oldDbConnection;
 
-app.commandLine.appendSwitch('force-gpu-rasterization');
-app.commandLine.appendSwitch('enable-features', 'WebView2');
+        // 3. 如果旧数据库存在，且【没有】被标记为已迁移
+        if (fs.existsSync(oldDataPath) && !fs.existsSync(migratedMarker)) {
+            console.log(`发现旧的安装目录数据库: ${oldDataPath}，开始迁移到 userData...`);
+            
+            try {
+                // 4. Open old DB
+                oldDbConnection = require('better-sqlite3')(oldDataPath);
+                
+                // 5. Run transaction (Data Copy)
+                db.db.transaction(() => {
+                    const configs = oldDbConnection.prepare('SELECT * FROM app_config').all();
+                    const configStmt = db.db.prepare('INSERT OR REPLACE INTO app_config (key, value) VALUES (?, ?)');
+                    for (const config of configs) { configStmt.run(config.key, config.value); }
+                    console.log(`- 合并了 ${configs.length} 条配置项。`);
 
-// ==========================================
-// --- [核心工具函数定义 (Moved to Top)] ---
-// ==========================================
+                    const logs = oldDbConnection.prepare('SELECT * FROM logs').all();
+                    const logStmt = db.db.prepare('INSERT OR IGNORE INTO logs (id, timestamp, action, category) VALUES (?, ?, ?, ?)');
+                    for (const log of logs) { logStmt.run(log.id, log.timestamp, log.action, log.category); }
+                    console.log(`- 合并了 ${logs.length} 条日志记录。`);
 
-// 简单的 HTTP GET 请求
-function simpleFetch(url) {
-    return new Promise((resolve) => {
-        const req = https.get(url, { timeout: 3000 }, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try { resolve(JSON.parse(data)); } catch { resolve(null); }
-            });
-        });
-        req.on('error', () => resolve(null));
-        req.on('timeout', () => { req.abort(); resolve(null); });
-    });
-}
+                    const traffics = oldDbConnection.prepare('SELECT * FROM traffic_log').all();
+                    const trafficStmt = db.db.prepare('INSERT OR REPLACE INTO traffic_log (log_date, bytes_used) VALUES (?, ?)');
+                    for (const traffic of traffics) { trafficStmt.run(traffic.log_date, traffic.bytes_used); }
+                    console.log(`- 合并了 ${traffics.length} 条流量日志。`);
+                })();
+                console.log('数据合并成功！');
 
-// 加载远程配置 (前置定义，防止 undefined)
-async function loadRemoteConfigs() {
-    const urls = {
-        media_types: 'https://update.ymhut.cn/media-types.json',
-        update_info: `https://update.ymhut.cn/update-info.json?r=${Date.now()}`,
-        tool_status: `https://update.ymhut.cn/tool-status.json?r=${Date.now()}`
-    };
-    const offlineCapableTools = ['system-tool', 'system-info', 'base64-converter', 'qr-code-generator', 'chinese-converter', 'profanity-check', 'image-processor', 'archive-tool'];
+                // 6. Close old DB
+                oldDbConnection.close();
+                oldDbConnection = null;
+                console.log('旧数据库连接已关闭。');
 
-    const fetchAndCache = (key, url) => new Promise((resolve, reject) => {
-        https.get(url, (res) => {
-            if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try {
-                    const json = JSON.parse(data);
-                    db.saveRemoteConfig(key, json);
-                    resolve(json);
-                } catch (e) { reject(e); }
-            });
-        }).on('error', (err) => reject(err));
-    });
+                // 7. [新增] 等待 Windows 释放文件锁
+                await new Promise(resolve => setTimeout(resolve, 500)); // 500ms 延迟
 
-    try {
-        const [mediaTypes, updateInfo, toolStatus] = await Promise.all([
-            fetchAndCache('media_types', urls.media_types),
-            fetchAndCache('update_info', urls.update_info),
-            fetchAndCache('tool_status', urls.tool_status)
-        ]);
-        const configVersion = updateInfo.last_updated || 'unknown';
-        const oldConfigVersion = db.getConfig('config_version');
-        if (oldConfigVersion !== configVersion) {
-            db.setConfig('config_version', configVersion);
-            db.logAction({ timestamp: new Date().toISOString(), action: `远程配置已更新: ${configVersion}`, category: 'system' });
-        }
-        return { ...mediaTypes, ...updateInfo, tool_status: toolStatus, config_version: configVersion, is_offline_mode: false };
-    } catch (error) {
-        console.warn(`联网获取配置失败 (${error.message})，尝试读取数据库缓存...`);
-        const cachedMedia = db.getRemoteConfig('media_types');
-        const cachedUpdate = db.getRemoteConfig('update_info');
-        const cachedStatus = db.getRemoteConfig('tool_status');
+                // 8. Rename (Mark as migrated)
+                fs.renameSync(oldDataPath, migratedMarker);
+                console.log(`旧数据库已标记为: ${migratedMarker}`);
 
-        if (cachedMedia && cachedUpdate && cachedStatus) {
-            console.log('已加载本地缓存配置 (离线工具模式)');
-            const modifiedStatus = { ...cachedStatus };
-            for (const toolId in modifiedStatus) {
-                if (!offlineCapableTools.includes(toolId) && !toolId.startsWith('comment')) {
-                    modifiedStatus[toolId] = { enabled: false, message: "网络不可用，此在线工具已暂停服务 (离线模式)" };
+            } catch (error) {
+                console.error('数据库迁移过程中发生错误:', error);
+                
+                // [修改] 关键修复：处理 EBUSY 错误并打破循环
+                if (error.code === 'EBUSY') {
+                    console.warn('Rename 失败 (EBUSY)，但数据已复制。');
+                    try {
+                        // 手动创建标记文件以防止下次启动时再次迁移
+                        fs.writeFileSync(migratedMarker, `Rename failed on ${new Date().toISOString()} due to EBUSY, but data copy was successful.`);
+                        console.log('已手动创建迁移标记文件以打破循环。');
+                    } catch (markerError) {
+                        console.error('致命错误：无法创建迁移标记文件:', markerError);
+                    }
+                }
+                
+                // 无论如何，都向用户显示错误（这次是最后一次）
+                dialog.showErrorBox('数据迁移失败', `合并旧数据时发生错误: ${error.message}\n应用将使用新的数据库，旧数据可能丢失。`);
+            
+            } finally {
+                // 确保连接在任何情况下都被关闭
+                if (oldDbConnection && oldDbConnection.open) {
+                    oldDbConnection.close();
                 }
             }
-            db.logAction({ timestamp: new Date().toISOString(), action: `进入离线工具模式: ${error.message}`, category: 'system' });
-            return { ...cachedMedia, ...cachedUpdate, tool_status: modifiedStatus, config_version: (cachedUpdate.last_updated || 'cached') + ' (Offline)', is_offline_mode: true };
         }
-        throw new Error(`无法连接网络且无本地缓存: ${error.message}`);
     }
 }
 
-async function checkWriteAccess() {
-    if (!app.isPackaged) return true;
-    const dataDir = path.join(rootDir, 'data');
-    const testFile = path.join(dataDir, `_writetest_${Date.now()}`);
-    try {
-        if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-        fs.writeFileSync(testFile, 'test');
-        fs.unlinkSync(testFile);
-        return true;
-    } catch (error) {
-        dialog.showMessageBoxSync({ type: 'error', title: '权限不足', message: `应用需要管理员权限才能在安装目录中写入数据。` });
-        await ipcMain.handle('check-and-relaunch-as-admin');
-        app.quit();
-        return false;
-    }
-}
+// --- [修改结束] ---
 
-async function checkAndDownloadLanguagePack() {
-    let targetDir = langDir;
-    let defaultLangFile = path.join(targetDir, 'zh-CN.json');
-    if (!fs.existsSync(targetDir)) {
-        if (fs.existsSync(langDirFallback)) targetDir = langDirFallback;
-        else try { fs.mkdirSync(langDir, { recursive: true }); } catch (e) { }
-    }
-    if (fs.existsSync(path.join(targetDir, 'zh-CN.json'))) return true;
-
-    const choice = dialog.showMessageBoxSync({ type: 'warning', title: '缺失核心文件', message: '检测到默认语言包丢失。', buttons: ['下载修复', '退出'], defaultId: 0, cancelId: 1 });
-    if (choice === 1) { app.quit(); return false; }
-
-    try {
-        const downloadUrl = 'https://update.ymhut.cn/lang/zh-CN.json';
-        const downloadTarget = path.join(langDir, 'zh-CN.json');
-        await new Promise((resolve, reject) => {
-            const file = fs.createWriteStream(downloadTarget);
-            https.get(downloadUrl, (res) => {
-                if (res.statusCode !== 200) { reject(new Error(res.statusCode)); return; }
-                res.pipe(file); file.on('finish', () => file.close(resolve));
-            }).on('error', (err) => { fs.unlink(downloadTarget, () => { }); reject(err); });
-        });
-        app.relaunch(); app.quit(); return false;
-    } catch (error) { return false; }
-}
-
-function loadConfigAndLanguage() {
-    try {
-        const configPath = path.join(rootDir, 'config.ini');
-        if (fs.existsSync(configPath)) appConfig = ini.parse(fs.readFileSync(configPath, 'utf-8'));
-    } catch (e) { }
-    let activeLangDir = langDir;
-    if (!fs.existsSync(path.join(activeLangDir, 'zh-CN.json')) && fs.existsSync(path.join(langDirFallback, 'zh-CN.json'))) activeLangDir = langDirFallback;
-    try { fallbackLanguagePack = JSON.parse(fs.readFileSync(path.join(activeLangDir, 'zh-CN.json'), 'utf-8')); } catch (e) { }
-    let targetLang = appConfig.Settings?.Language || 'auto';
-    if (targetLang === 'auto') targetLang = app.getLocale().split('-')[0] === 'zh' ? 'zh-CN' : 'en-US';
-    if (targetLang === 'zh-CN') currentLanguagePack = fallbackLanguagePack;
-    else {
-        try { currentLanguagePack = JSON.parse(fs.readFileSync(path.join(activeLangDir, `${targetLang}.json`), 'utf-8')); } catch (e) { currentLanguagePack = fallbackLanguagePack; }
-    }
-}
-
-async function migrateAndInitializeDatabase() {
-    const newDbPath = determineDataPath();
-    const newDbDir = path.dirname(newDbPath);
-    if (fs.existsSync(newDbPath)) {
-        try { db = new AppDatabase(newDbPath); return; } catch (e) { app.quit(); return; }
-    }
-    try { fs.mkdirSync(newDbDir, { recursive: true }); db = new AppDatabase(newDbPath); } catch (e) { app.quit(); }
-}
-
-async function checkAndLogReinstall() {
-    const uninstallInfo = appConfig.UninstallInfo;
-    if (uninstallInfo && uninstallInfo.Time) {
-        try {
-            const uninstallTime = new Date(uninstallInfo.Time);
-            if (new Date() - uninstallTime < 86400000) db.logAction({ timestamp: new Date().toISOString(), action: `检测到快速重装/升级至 v${APP_VERSION}`, category: 'system' });
-            delete appConfig.UninstallInfo;
-            fs.writeFileSync(path.join(rootDir, 'config.ini'), ini.stringify(appConfig));
-        } catch (e) { }
-    }
-}
-
+let networkMonitor = { currentBytes: 0, lastTimestamp: Date.now() };
+let networkSpeedInterval = null;
 let userPublicIp = null;
+let cpuUsage = {
+    prev: process.cpuUsage(),
+    prevTime: process.hrtime()
+};
+
 async function getPublicIP() {
     if (userPublicIp) return userPublicIp;
     const apis = ['https://api.ipify.org?format=json', 'https://ipinfo.io/json'];
     for (const apiUrl of apis) {
         try {
-            const response = await new Promise((resolve, reject) => { https.get(apiUrl, { timeout: 3000 }, res => resolve(res)).on('error', reject); });
+            const response = await new Promise((resolve, reject) => {
+                https.get(apiUrl, { timeout: 3000 }, res => resolve(res)).on('error', reject);
+            });
             if (response.statusCode === 200) {
-                let data = ''; for await (const chunk of response) { data += chunk; }
+                let data = '';
+                for await (const chunk of response) { data += chunk; }
                 const jsonData = JSON.parse(data);
-                if (jsonData.ip) { userPublicIp = jsonData.ip; return userPublicIp; }
+                if (jsonData.ip) {
+                    userPublicIp = jsonData.ip;
+                    return userPublicIp;
+                }
             }
-        } catch (e) { }
+        } catch (e) {
+            console.warn('从 ' + apiUrl + ' 获取公网IP失败', e.message);
+        }
     }
     return null;
 }
 
 async function fetchIpBanList() {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
         https.get(`https://update.ymhut.cn/ip-ban-list.json?r=${Date.now()}`, { timeout: 4000 }, (res) => {
             if (res.statusCode !== 200) return resolve([]);
-            let data = ''; res.on('data', chunk => data += chunk);
-            res.on('end', () => { try { const parsed = JSON.parse(data); resolve(Array.isArray(parsed.banned_ips) ? parsed.banned_ips : []); } catch (e) { resolve([]); } });
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const parsed = JSON.parse(data);
+                    resolve(Array.isArray(parsed.banned_ips) ? parsed.banned_ips : []);
+                } catch (e) {
+                    resolve([]);
+                }
+            });
         }).on('error', () => resolve([]));
     });
 }
 
-let networkMonitor = { currentBytes: 0, lastTimestamp: Date.now() };
-let networkSpeedInterval = null;
-let cpuUsage = { prev: process.cpuUsage(), prevTime: process.hrtime() };
-
 process.on('uncaughtException', (error, origin) => {
-    try { if (db) db.logAction({ timestamp: new Date().toISOString(), action: `主进程错误: ${error.message}`, category: 'error' }); } catch (dbError) { }
+    console.error(`Caught exception: ${error}\n` + `Exception origin: ${origin}`);
+    try {
+        db.logAction({
+            timestamp: new Date().toISOString(),
+            action: `主进程发生未捕获的错误: ${error.message}`,
+            category: 'error'
+        });
+    } catch (dbError) {
+        console.error('无法将严重错误写入数据库:', dbError);
+    }
 });
 
-// ==========================================
-// --- [窗口管理] ---
-// ==========================================
+const APP_VERSION = app.getVersion();
+let mainWindow;
+let splashWindow;
+let downloadController = null;
+let windowStateChangeTimer = null;
+let acknowledgementsWindow = null;
+let toolWindows = new Map();
+
+app.commandLine.appendSwitch('force-gpu-rasterization');
+app.commandLine.appendSwitch('enable-features', 'WebView2');
 
 function createSplashWindow() {
     const themeFromConfig = db ? db.getConfig('theme') : 'dark';
+    const savedTheme = themeFromConfig || 'dark';
+    
     splashWindow = new BrowserWindow({
-        width: 600, height: 300, frame: false, resizable: false, center: true, transparent: true, hasShadow: false, alwaysOnTop: true,
-        backgroundColor: '#00000000', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
-        show: false, skipTaskbar: true,
+        width: 450,
+        height: 320,
+        frame: false,
+        resizable: false,
+        center: true,
+        webPreferences: {
+            preload: path.join(__dirname, 'preload.js'),
+            contextIsolation: true,
+        },
+        backgroundColor: savedTheme === 'dark' ? '#161618' : '#f7f7f9',
+        show: false,
+        skipTaskbar: true,
     });
-    splashWindow.loadFile(path.join(__dirname, 'src/splash.html'), { query: { "theme": themeFromConfig } });
+    splashWindow.loadFile(path.join(__dirname, 'src/splash.html'), { query: { "theme": savedTheme } });
     splashWindow.on('ready-to-show', () => splashWindow.show());
     splashWindow.on('closed', () => { splashWindow = null; });
-}
-
-function createDisclaimerWindow() {
-    const themeFromConfig = db ? db.getConfig('theme') : 'dark';
-    disclaimerWindow = new BrowserWindow({
-        width: 480, height: 600, frame: false, resizable: false, center: true, transparent: true, hasShadow: false,
-        webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
-        show: false
-    });
-    disclaimerWindow.loadFile(path.join(__dirname, 'src/disclaimer.html'), { query: { "theme": themeFromConfig } });
-    disclaimerWindow.once('ready-to-show', () => {
-        disclaimerWindow.show();
-        if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close();
-    });
-    disclaimerWindow.on('closed', () => { disclaimerWindow = null; });
-}
-
-function launchMainApp() {
-    if (!pendingLaunchConfig) return;
-    if (pendingLaunchConfig.isOffline) createMainWindow({ isOffline: true, error: pendingLaunchConfig.error });
-    else createMainWindow(pendingLaunchConfig.config);
 }
 
 function isWindowVisible(bounds) {
     const displays = screen.getAllDisplays();
     return displays.some(display => {
         const dBounds = display.workArea;
-        return (bounds.x >= dBounds.x && bounds.y >= dBounds.y && bounds.x + bounds.width <= dBounds.x + dBounds.width && bounds.y + bounds.height <= dBounds.y + dBounds.height);
+        return (
+            bounds.x >= dBounds.x &&
+            bounds.y >= dBounds.y &&
+            bounds.x + bounds.width <= dBounds.x + dBounds.width &&
+            bounds.y + bounds.height <= dBounds.y + dBounds.height
+        );
     });
 }
 
@@ -299,36 +242,47 @@ async function createMainWindow(initialConfig) {
     const savedHeight = parseInt(db.getConfig('window_height'), 10);
     const savedX = parseInt(db.getConfig('window_x'), 10);
     const savedY = parseInt(db.getConfig('window_y'), 10);
-    const customFontName = db.getConfig('custom_font_name') || '';
-    const customFontPath = db.getConfig('custom_font_path') || '';
+    const minWidth = 1200;
+    const minHeight = 768;
 
     let windowOptions = {
-        width: savedWidth || 1500, height: savedHeight || 940, minWidth: 1200, minHeight: 768, frame: false, titleBarStyle: 'hidden',
-        webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, webviewTag: true },
-        show: false, icon: path.join(__dirname, 'src/assets/icon.ico'), transparent: true, hasShadow: false
+        width: savedWidth || 1500,
+        height: savedHeight || 940,
+        minWidth: minWidth,
+        minHeight: minHeight,
+        frame: false,
+        titleBarStyle: 'hidden',
+        webPreferences: {
+            preload: path.join(__dirname, 'preload.js'),
+            contextIsolation: true,
+            webviewTag: true
+        },
+        show: false,
+        icon: path.join(__dirname, 'src/assets/icon.ico'),
+        transparent: true,
+        hasShadow: false
     };
 
     if (!isNaN(savedX) && !isNaN(savedY)) {
         if (isWindowVisible({ x: savedX, y: savedY, width: windowOptions.width, height: windowOptions.height })) {
-            windowOptions.x = savedX; windowOptions.y = savedY;
+            windowOptions.x = savedX;
+            windowOptions.y = savedY;
         }
     }
 
-    let cachedVersions = {};
-    const today = new Date().toISOString().split('T')[0];
-    if (appConfig.Environment && appConfig.Environment.app_version && appConfig.Environment.last_checked_date === today) {
-        cachedVersions = appConfig.Environment;
-    } else {
-        const detectedVersions = await si.versions('node, npm, git, docker, python, gcc, java, perl, go');
-        cachedVersions = { ...detectedVersions, app_version: APP_VERSION, electron: process.versions.electron, node: process.versions.node, chromium: process.versions.chrome, last_checked_date: today };
-        appConfig.Environment = cachedVersions;
-        try { fs.writeFileSync(path.join(rootDir, 'config.ini'), ini.stringify(appConfig)); } catch (e) { }
-    }
-
+    const versions = await si.versions('node, npm, git, docker, python, gcc, java, perl, go');
     const finalConfig = {
         ...initialConfig,
         dbSettings: {
-            theme, globalVolume: volume ? parseFloat(volume) : 0.5, backgroundImage: background_image, backgroundOpacity: background_opacity ? parseFloat(background_opacity) : 1.0, cardOpacity: card_opacity ? parseFloat(card_opacity) : 0.7, customFontName, customFontPath, versions: cachedVersions, electronVersion: process.versions.electron, nodeVersion: process.versions.node, chromeVersion: process.versions.chrome, config_version: initialConfig.config_version
+            theme,
+            globalVolume: volume ? parseFloat(volume) : 0.5,
+            backgroundImage: background_image,
+            backgroundOpacity: background_opacity ? parseFloat(background_opacity) : 1.0,
+            cardOpacity: card_opacity ? parseFloat(card_opacity) : 0.7,
+            versions: versions,
+            electronVersion: process.versions.electron,
+            nodeVersion: process.versions.node,
+            chromeVersion: process.versions.chrome
         }
     };
 
@@ -340,22 +294,14 @@ async function createMainWindow(initialConfig) {
             "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com",
             "worker-src 'self' blob:",
             "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com",
-            "font-src 'self' https://cdnjs.cloudflare.com https://s1.hdslb.com https://cdn.jsdelivr.net https://registry.npmmirror.com file: data:",
-            "img-src 'self' data: blob: http: https:",
-            "connect-src 'self' http: https:",
-            "media-src 'self' blob: http: https:",
-            "frame-src 'self' http: https:",
+            "font-src 'self' https://cdnjs.cloudflare.com",
+            "img-src 'self' data: blob: http: https:", // 允许加载 http 和 https 图片
+            "connect-src 'self' http: https:",       // 允许连接 http 和 https
+            "media-src 'self' blob: http: https:",     // 允许加载 http 和 https 媒体
+            // "webview-src https:", // <-- **移除这一行**
             "upgrade-insecure-requests"
         ].join('; ');
-
-        try {
-            const contentLength = details.responseHeaders['Content-Length'] || details.responseHeaders['content-length'];
-            if (contentLength && contentLength.length > 0) {
-                const bytes = parseInt(contentLength[0], 10);
-                if (bytes > 0) { db.addTraffic(bytes); networkMonitor.currentBytes += bytes; }
-            }
-        } catch (e) { }
-
+        
         callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [policy] } });
     });
 
@@ -367,7 +313,8 @@ async function createMainWindow(initialConfig) {
             if (timeDiff > 0) {
                 const speed = networkMonitor.currentBytes / timeDiff;
                 mainWindow.webContents.send('network-speed-update', { speed });
-                networkMonitor.currentBytes = 0; networkMonitor.lastTimestamp = now;
+                networkMonitor.currentBytes = 0;
+                networkMonitor.lastTimestamp = now;
             }
         }
     }, 1000);
@@ -375,159 +322,128 @@ async function createMainWindow(initialConfig) {
     const saveWindowState = () => {
         if (!mainWindow || mainWindow.isDestroyed()) return;
         const bounds = mainWindow.getBounds();
-        db.setConfig('window_width', bounds.width.toString()); db.setConfig('window_height', bounds.height.toString());
-        db.setConfig('window_x', bounds.x.toString()); db.setConfig('window_y', bounds.y.toString());
+        db.setConfig('window_width', bounds.width.toString());
+        db.setConfig('window_height', bounds.height.toString());
+        db.setConfig('window_x', bounds.x.toString());
+        db.setConfig('window_y', bounds.y.toString());
     };
     const debouncedSave = () => { clearTimeout(windowStateChangeTimer); windowStateChangeTimer = setTimeout(saveWindowState, 500); };
     mainWindow.on('resize', debouncedSave);
     mainWindow.on('move', debouncedSave);
-
     nativeTheme.themeSource = theme;
     mainWindow.loadFile(path.join(__dirname, 'src/index.html'));
-
     mainWindow.once('ready-to-show', () => {
         mainWindow.webContents.send('initial-data', finalConfig);
         mainWindow.show();
         mainWindow.focus();
-
-        // 确保其他窗口关闭，避免进程退出
-        if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close();
-        if (disclaimerWindow && !disclaimerWindow.isDestroyed()) disclaimerWindow.close();
+        if (splashWindow) splashWindow.close();
     });
     mainWindow.on('closed', () => { mainWindow = null; });
 }
 
 app.on('ready', async () => {
-    if (app.isPackaged) { if (!(await checkWriteAccess())) return; }
-    if (!(await checkAndDownloadLanguagePack())) return;
-    loadConfigAndLanguage();
-    await migrateAndInitializeDatabase();
-    await checkAndLogReinstall();
-    const verCheck = db.checkAndRecordVersion(APP_VERSION);
-    if (verCheck.isUpgrade) db.logAction({ timestamp: new Date().toISOString(), action: `应用已更新: v${verCheck.oldVersion} -> v${APP_VERSION}`, category: 'update' });
+    migrateAndInitializeDatabase();
     createSplashWindow();
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') { if (networkSpeedInterval) clearInterval(networkSpeedInterval); db.close(); app.quit(); } });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createSplashWindow(); });
 
-// ==========================================
-// --- [IPC 通信处理] ---
-// ==========================================
+ipcMain.on('initialization-complete', (event, result) => {
+    if (result.isOffline) {
+        createMainWindow({ isOffline: true, error: result.error });
+    } else {
+        createMainWindow(result.config);
+    }
+});
 
-// 1. 初始化 (加载配置和天气)
 ipcMain.handle('run-initialization', async () => {
     let totalProgress = 0;
-    const updateStep = async (status, increment, minDuration = 500) => {
+    const sendProgress = (status, increment) => {
         totalProgress += increment;
-        const targetProgress = Math.min(totalProgress, 99);
         if (splashWindow && !splashWindow.isDestroyed()) {
-            splashWindow.webContents.send('init-progress', { status, progress: targetProgress });
+            splashWindow.webContents.send('init-progress', { status, progress: Math.min(totalProgress, 100) });
         }
-        await new Promise(r => setTimeout(r, minDuration));
     };
-
+    
     let combinedConfig = {};
-    let isFatalOffline = false;
-    let errorMsg = '';
-    let initWeatherData = null;
+    let isOffline = false;
+    let offlineError = '';
 
+    sendProgress('启动核心服务...', 10);
+    await new Promise(r => setTimeout(r, 200));
+    sendProgress('检查本地数据...', 15);
+    await new Promise(r => setTimeout(r, 500));
+    
     try {
-        await updateStep('正在检测运行环境权限...', 10, 600);
-        await updateStep('读取本地配置文件...', 15, 800);
-        await updateStep('校验数据库与本地缓存...', 15, 800);
-
-        const startTime = Date.now();
-        // 调用前置定义的 loadRemoteConfigs
+        sendProgress('检查网络连接...', 15);
+        await checkNetworkStatus();
+        sendProgress('网络连接正常', 5);
+        sendProgress('获取远程配置...', 25);
         combinedConfig = await loadRemoteConfigs();
-
-        if (!combinedConfig.is_offline_mode) {
-            const ipData = await simpleFetch('https://uapis.cn/api/v1/network/myip?source=commercial');
-            if (ipData && ipData.code === 200 && ipData.city) {
-                const weatherData = await simpleFetch(`https://api.suyanw.cn/api/weather.php?city=${encodeURIComponent(ipData.city)}&type=json`);
-                if (weatherData) initWeatherData = { ip: ipData, weather: weatherData };
-            }
-        }
-
-        const networkTime = Date.now() - startTime;
-        if (networkTime < 1500) await new Promise(r => setTimeout(r, 1500 - networkTime));
-        totalProgress = 70;
-
-        if (combinedConfig.is_offline_mode) await updateStep('网络受限，正在切换离线策略...', 20, 1000);
-        else await updateStep('解析气象卫星数据...', 20, 800);
-
+        sendProgress('远程配置加载完毕', 10);
     } catch (error) {
-        isFatalOffline = true; errorMsg = error.message; await updateStep('初始化遇到问题...', 10, 1500);
+        console.warn('进入离线模式:', error.message);
+        isOffline = true;
+        offlineError = error.message;
+        sendProgress('网络不可用，进入离线模式...', 40);
     }
-    await updateStep('正在构建 UI...', 5, 600);
-    return { success: true, config: { ...combinedConfig, initWeatherData }, isOffline: isFatalOffline, error: errorMsg };
+    
+    sendProgress('准备就绪...', 20);
+    await new Promise(r => setTimeout(r, 200));
+    
+    return {
+        success: true,
+        config: combinedConfig,
+        isOffline: isOffline,
+        error: offlineError
+    };
 });
 
-// 2. 初始化完成 -> 协议分流
-ipcMain.on('initialization-complete', (event, result) => {
-    pendingLaunchConfig = result;
-    const dbAgreed = db.getConfig('user_agreement_accepted') === 'true';
-    let iniAgreed = false;
+
+async function checkNetworkStatus() {
+    return new Promise((resolve, reject) => {
+        https.get('https://www.baidu.com', { timeout: 3000 }, (res) => { res.resume(); resolve(true); }).on('error', (err) => reject(new Error('网络连接不可用')));
+    });
+}
+
+async function loadRemoteConfigs() {
+    const mediaTypesUrl = 'https://update.ymhut.cn/media-types.json';
+    const updateInfoUrl = `https://update.ymhut.cn/update-info.json?r=${Date.now()}`;
+    // [新增] 工具状态配置文件的 URL
+    const toolStatusUrl = `https://update.ymhut.cn/tool-status.json?r=${Date.now()}`;
+
+    const fetchJsonAndCountTraffic = (url) => new Promise((resolve, reject) => {
+        https.get(url, (res) => {
+            if (res.statusCode !== 200) return reject(new Error(`请求失败，状态码: ${res.statusCode}`));
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const trafficBytes = Buffer.byteLength(data, 'utf8');
+                    db.addTraffic(trafficBytes);
+                    db.logAction({ timestamp: new Date().toISOString(), action: `加载远程配置 ${path.basename(url)}，计入流量: ${trafficBytes} Bytes`, category: 'system' });
+                    resolve(JSON.parse(data));
+                } catch (e) { reject(new Error('解析JSON配置失败')); }
+            });
+        }).on('error', (err) => reject(err));
+    });
+    
     try {
-        const configPath = path.join(rootDir, 'config.ini');
-        if (fs.existsSync(configPath)) {
-            const d = ini.parse(fs.readFileSync(configPath, 'utf-8'));
-            if (d.Settings?.UserAgreementAccepted === 'true') iniAgreed = true;
-        }
-    } catch (e) { }
+        // [修改] 使用 Promise.all 并行获取三个文件
+        const [mediaTypes, updateInfo, toolStatus] = await Promise.all([
+            fetchJsonAndCountTraffic(mediaTypesUrl), 
+            fetchJsonAndCountTraffic(updateInfoUrl),
+            fetchJsonAndCountTraffic(toolStatusUrl) // [新增]
+        ]);
+        
+        // [修改] 将 toolStatus 合并到最终配置中，键为 "tool_status"
+        return { ...mediaTypes, ...updateInfo, tool_status: toolStatus };
+    } catch (error) { 
+        throw new Error(`获取远程配置失败: ${error.message}`); 
+    }
+}
 
-    if (dbAgreed || iniAgreed) launchMainApp();
-    else createDisclaimerWindow();
-});
-
-// 3. 确认协议
-ipcMain.handle('confirm-user-agreement', () => {
-    try {
-        if (db) {
-            db.setConfig('user_agreement_accepted', 'true');
-            db.logAction({ timestamp: new Date().toISOString(), action: '用户已同意免责声明', category: 'system' });
-        }
-        const configPath = path.join(rootDir, 'config.ini');
-        let iniConfig = {};
-        if (fs.existsSync(configPath)) { try { iniConfig = ini.parse(fs.readFileSync(configPath, 'utf-8')); } catch (e) { } }
-        iniConfig.Settings = iniConfig.Settings || {};
-        iniConfig.Settings.UserAgreementAccepted = 'true';
-        try { fs.writeFileSync(configPath, ini.stringify(iniConfig)); } catch (e) { }
-
-        launchMainApp();
-        return { success: true };
-    } catch (e) { return { success: false, error: e.message }; }
-});
-
-ipcMain.handle('check-user-agreement', () => {
-    const dbValue = db ? db.getConfig('user_agreement_accepted') : 'false';
-    const configPath = path.join(rootDir, 'config.ini');
-    let iniValue = 'false';
-    try {
-        if (fs.existsSync(configPath)) {
-            const iniData = ini.parse(fs.readFileSync(configPath, 'utf-8'));
-            iniValue = iniData.Settings?.UserAgreementAccepted || 'false';
-        }
-    } catch (e) { }
-    return (dbValue === 'true' || iniValue === 'true');
-});
-
-// ... (其余标准 IPC 处理器) ...
-ipcMain.handle('get-language-config', () => {
-    let lang = appConfig.Settings?.Language || 'auto';
-    if (lang === 'auto') { const locale = app.getLocale().split('-')[0]; lang = locale === 'en' ? 'en-US' : 'zh-CN'; }
-    return { current: lang, pack: currentLanguagePack, fallback: fallbackLanguagePack };
-});
-ipcMain.handle('save-language-config', (event, lang) => {
-    try {
-        const configPath = path.join(rootDir, 'config.ini');
-        const currentConfig = ini.parse(fs.readFileSync(configPath, 'utf-8'));
-        currentConfig.Settings = currentConfig.Settings || {}; currentConfig.Settings.Language = lang;
-        fs.writeFileSync(configPath, ini.stringify(currentConfig));
-        if (db) db.close(); setTimeout(() => { app.relaunch(); app.quit(); }, 1000);
-        return { success: true };
-    } catch (e) { return { success: false, error: e.message }; }
-});
 ipcMain.on('window-minimize', () => mainWindow?.minimize());
 ipcMain.on('window-maximize', () => { if (mainWindow?.isMaximized()) mainWindow.unmaximize(); else mainWindow?.maximize(); });
 ipcMain.on('window-close', () => mainWindow?.close());
@@ -544,9 +460,16 @@ ipcMain.handle('check-updates', async () => {
     const updateURL = `https://update.ymhut.cn/update-info.json?r=${Date.now()}`;
     return new Promise((resolve, reject) => {
         https.get(updateURL, (res) => {
-            let data = ''; res.on('data', chunk => data += chunk);
-            res.on('end', () => { try { const info = JSON.parse(data); const hasUpdate = info.app_version > APP_VERSION; resolve({ hasUpdate, currentVersion: APP_VERSION, remoteVersion: info.app_version, updateNotes: info.update_notes, downloadUrl: info.download_url }); } catch (e) { reject(new Error('解析失败')); } });
-        }).on('error', (e) => reject(new Error('获取失败: ' + e.message)));
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const info = JSON.parse(data);
+                    const hasUpdate = info.app_version > APP_VERSION;
+                    resolve({ hasUpdate, currentVersion: APP_VERSION, remoteVersion: info.app_version, updateNotes: info.update_notes, downloadUrl: info.download_url });
+                } catch (e) { reject(new Error('解析更新信息失败')); }
+            });
+        }).on('error', (e) => reject(new Error('获取更新信息失败: ' + e.message)));
     });
 });
 ipcMain.handle('download-update', async (event, url) => {
@@ -555,12 +478,14 @@ ipcMain.handle('download-update', async (event, url) => {
     const writer = require('fs').createWriteStream(downloadPath);
     return new Promise((resolve, reject) => {
         const request = https.get(url, (response) => {
-            if (response.statusCode !== 200) return reject({ success: false, error: `Code ${response.statusCode}` });
+            if (response.statusCode !== 200) return reject({ success: false, error: `服务器文件错误: 状态码 ${response.statusCode}` });
             const totalBytes = parseInt(response.headers['content-length'], 10);
+            if (totalBytes < 1024 * 1024) { request.abort(); return reject({ success: false, error: '服务器文件错误 (文件过小)' }); }
             let receivedBytes = 0; let lastTime = Date.now(); let lastReceivedBytes = 0;
             downloadController = { abort: () => request.abort() };
             response.on('data', (chunk) => {
-                networkMonitor.currentBytes += chunk.length; receivedBytes += chunk.length;
+                networkMonitor.currentBytes += chunk.length;
+                receivedBytes += chunk.length;
                 const now = Date.now();
                 if (now - lastTime > 500) {
                     const speed = (receivedBytes - lastReceivedBytes) / ((now - lastTime) / 1000);
@@ -568,97 +493,550 @@ ipcMain.handle('download-update', async (event, url) => {
                     lastTime = now; lastReceivedBytes = receivedBytes;
                 }
             });
-            response.on('aborted', () => { downloadController = null; reject({ success: false, error: 'Stop' }); });
-            pipeline(response, writer, async (err) => { downloadController = null; if (err) reject({ success: false, error: err.message }); else resolve({ success: true, path: downloadPath }); });
-        }).on('error', (err) => { downloadController = null; reject({ success: false, error: 'Network Error' }); });
+            response.on('aborted', () => { downloadController = null; reject({ success: false, error: '已停止' }); });
+            pipeline(response, writer, async (err) => {
+                downloadController = null;
+                if (err) reject({ success: false, error: err.message });
+                else { await db.addTraffic(totalBytes); resolve({ success: true, path: downloadPath }); }
+            });
+        }).on('error', (err) => { downloadController = null; reject({ success: false, error: '网络状态异常' }); });
     });
 });
 ipcMain.handle('cancel-download', () => { if (downloadController) { downloadController.abort(); downloadController = null; return { success: true }; } return { success: false }; });
-ipcMain.handle('install-update', async (event, filePath) => { try { shell.openPath(filePath); setTimeout(() => app.quit(), 1500); return { success: true }; } catch (e) { return { success: false, error: e.message }; } });
 ipcMain.handle('open-file', (event, filePath) => shell.openPath(filePath));
 ipcMain.handle('open-external-link', (event, url) => shell.openExternal(url));
 ipcMain.handle('show-item-in-folder', (event, filePath) => shell.showItemInFolder(filePath));
-ipcMain.handle('save-media', async (event, { buffer, defaultPath, type, name, path: fPath }) => {
-    if (type === 'config_font') { await db.setConfig('custom_font_name', name); await db.setConfig('custom_font_path', fPath); return { success: true }; }
-    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, { title: '保存', defaultPath });
-    if (!canceled && filePath) { try { await fs.promises.writeFile(filePath, Buffer.from(buffer)); return { success: true, path: filePath }; } catch (error) { return { success: false, error: error.message }; } }
-    return { success: false, error: 'Cancel' };
-});
 ipcMain.handle('set-theme', async (event, theme) => { nativeTheme.themeSource = theme; return await db.setConfig('theme', theme); });
 ipcMain.handle('set-global-volume', async (event, volume) => await db.setConfig('global_volume', volume.toString()));
 ipcMain.handle('select-background-image', async () => {
-    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, { title: '选择图片', properties: ['openFile'], filters: [{ name: 'Images', extensions: ['jpg', 'png', 'webp'] }] });
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, { title: '选择背景图片', properties: ['openFile'], filters: [{ name: 'Images', extensions: ['jpg', 'png', 'webp'] }] });
     if (!canceled && filePaths.length > 0) {
         try {
-            const filePath = filePaths[0]; const dataUrl = `data:image/${path.extname(filePath).substring(1)};base64,${await fs.promises.readFile(filePath, 'base64')}`;
-            await db.setConfig('background_image', dataUrl); return { success: true, path: dataUrl };
+            const filePath = filePaths[0];
+            const dataUrl = `data:image/${path.extname(filePath).substring(1)};base64,${await fs.promises.readFile(filePath, 'base64')}`;
+            await db.setConfig('background_image', dataUrl);
+            return { success: true, path: dataUrl };
         } catch (error) { return { success: false, error: error.message }; }
-    } return { success: false, error: 'Cancel' };
+    }
+    return { success: false, error: '用户取消选择' };
 });
 ipcMain.handle('clear-background-image', async () => await db.setConfig('background_image', ''));
 ipcMain.handle('set-background-opacity', async (event, opacity) => await db.setConfig('background_opacity', opacity.toString()));
 ipcMain.handle('set-card-opacity', async (event, opacity) => await db.setConfig('card_opacity', opacity.toString()));
-ipcMain.on('launch-system-tool', (event, command) => { const cmd = process.platform === 'win32' ? `start "" "${command}"` : command; exec(cmd, (error) => { if (error) dialog.showErrorBox('Fail', error.message); }); });
-ipcMain.handle('show-confirmation-dialog', async (event, options) => { return await dialog.showMessageBox(mainWindow, { type: 'question', buttons: ['确定', '取消'], defaultId: 0, cancelId: 1, title: options.title, message: options.message, detail: options.detail }); });
+ipcMain.handle('save-media', async (event, { buffer, defaultPath }) => {
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, { title: '保存媒体文件', defaultPath });
+    if (!canceled && filePath) {
+        try {
+            const dataBuffer = Buffer.from(buffer);
+            await fs.promises.writeFile(filePath, dataBuffer);
+            await db.addTraffic(dataBuffer.length);
+            return { success: true, path: filePath };
+        } catch (error) { return { success: false, error: error.message }; }
+    }
+    return { success: false, error: '用户取消保存' };
+});
+ipcMain.on('launch-system-tool', (event, command) => {
+    if (command.startsWith('ms-')) {
+        shell.openExternal(command);
+    } else {
+        const commandToExecute = process.platform === 'win32' ? `start "" "${command}"` : command;
+        exec(commandToExecute, (error) => {
+            if (error) {
+                console.error(`执行命令失败: ${command}`, error);
+                dialog.showErrorBox('操作失败', `无法启动系统工具: ${command}\n\n错误信息: ${error.message}`);
+            }
+        });
+    }
+});
+ipcMain.handle('show-confirmation-dialog', async (event, options) => {
+    const result = await dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['确定', '取消'],
+        defaultId: 0,
+        cancelId: 1,
+        title: options.title || '确认',
+        message: options.message || '您确定要执行此操作吗？',
+        detail: options.detail || ''
+    });
+    return result;
+});
+
+function checkIsAdmin() {
+    return new Promise((resolve) => {
+        if (process.platform === 'win32') {
+            exec('net session', (err) => {
+                resolve(err === null);
+            });
+        } else {
+            resolve(process.getuid && process.getuid() === 0);
+        }
+    });
+}
 ipcMain.handle('check-and-relaunch-as-admin', async () => {
-    const isAdmin = await new Promise(r => process.platform === 'win32' ? exec('net session', err => r(!err)) : r(process.getuid && process.getuid() === 0));
-    if (isAdmin) return { isAdmin: true };
-    const { response } = await dialog.showMessageBox(mainWindow, { type: 'info', buttons: ['以管理员身份重启', '取消'], title: '需要权限', message: '部分功能需要管理员权限。' });
+    const isAdmin = await checkIsAdmin();
+    if (isAdmin) {
+        return { isAdmin: true };
+    }
+    const { response } = await dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        buttons: ['以管理员身份重启', '取消'],
+        title: '需要管理员权限',
+        message: '“系统工具”中的部分功能需要管理员权限才能正常运行。',
+        detail: '为了使用所有功能，建议您授权应用以管理员身份重启。'
+    });
     if (response === 0) {
-        const cmd = app.isPackaged ? `"${process.execPath}"` : `"${process.execPath}" "${app.getAppPath()}"`;
-        sudo.exec(process.platform === 'win32' ? `start "" ${cmd}` : cmd, { name: 'YMhut Box' }, (err) => { if (err) dialog.showErrorBox('Fail', 'Cancel'); else app.quit(); });
+        const sudoOptions = { name: 'YMhut Box' };
+        let commandToExec;
+        if (app.isPackaged) {
+            commandToExec = `"${process.execPath}"`;
+        } else {
+            commandToExec = `"${process.execPath}" "${app.getAppPath()}"`;
+        }
+        const finalCommand = process.platform === 'win32' ? `start "" ${commandToExec}` : commandToExec;
+        sudo.exec(finalCommand, sudoOptions, (error) => {
+            if (error) {
+                dialog.showErrorBox('授权失败', '您取消了管理员授权，应用将继续以普通模式运行。');
+            } else {
+                app.quit();
+            }
+        });
         return { isAdmin: false, relaunching: true };
     }
     return { isAdmin: false, relaunching: false };
 });
+const safePromise = (promise) => {
+    if (!promise || typeof promise.then !== 'function') {
+        console.error("一个无效的非Promise值被传递给了safePromise:", promise);
+        return Promise.resolve(null);
+    }
+    return promise.catch(err => {
+        console.error("获取某项系统信息时出错 (非致命):", err.message);
+        return null;
+    });
+};
+
+function getWmicProperties(wmiClass, properties) {
+    return new Promise((resolve) => {
+        if (process.platform !== 'win32') {
+            return resolve(null);
+        }
+        const command = `wmic ${wmiClass} get ${properties.join(',')} /format:csv`;
+        exec(command, { encoding: 'buffer' }, (err, stdout) => {
+            if (err) return resolve(null);
+            try {
+                const decoded = iconv.decode(stdout, 'cp936');
+                const lines = decoded.trim().split('\r\n').filter(Boolean);
+                if (lines.length < 2) return resolve(null);
+                const headers = lines[0].split(',').map(h => h.trim());
+                const results = lines.slice(1).map(line => {
+                    const values = line.split(',');
+                    const obj = {};
+                    properties.forEach(prop => {
+                        const index = headers.findIndex(h => h.toLowerCase() === prop.toLowerCase());
+                        if (index > 0) {
+                            obj[prop] = values[index]?.trim() || '';
+                        }
+                    });
+                    return obj;
+                });
+                resolve(results);
+            } catch {
+                resolve(null);
+            }
+        });
+    });
+}
 ipcMain.handle('get-system-info', async () => {
     try {
-        let timeData = null; try { timeData = si.time(); } catch (e) { }
-        const [osData, cpuData, memData, memLayoutData, networkData, systemData, baseboardData, biosData, diskData, userData, versionsData, processesData, chassisData, graphicsData] = await Promise.all([
-            safePromise(si.osInfo()), safePromise(si.cpu()), safePromise(si.mem()), safePromise(si.memLayout()), safePromise(si.networkInterfaces()), safePromise(si.system()), safePromise(si.baseboard()), safePromise(si.bios()), safePromise(si.diskLayout()), safePromise(si.users()), safePromise(si.versions('node, npm, git, docker, python, gcc, java, perl, go')), safePromise(si.processes()), safePromise(si.chassis()), safePromise(si.graphics())
+        let timeData = null;
+        try {
+            timeData = si.time();
+        } catch (e) {
+            console.error("获取同步时间信息失败:", e);
+        }
+        const [
+            osData, cpuData, memData, memLayoutData, networkData,
+            systemData, baseboardData, biosData, diskData,
+            userData, versionsData, processesData, chassisData, graphicsData,
+
+            wmicOs, wmicComputerSystem, wmicBaseboard, wmicCpu, wmicVideoControllers
+        ] = await Promise.all([
+            safePromise(si.osInfo()), safePromise(si.cpu()), safePromise(si.mem()), safePromise(si.memLayout()), safePromise(si.networkInterfaces()),
+            safePromise(si.system()), safePromise(si.baseboard()), safePromise(si.bios()), safePromise(si.diskLayout()),
+            safePromise(si.users()), safePromise(si.versions('node, npm, git, docker, python, gcc, java, perl, go')), safePromise(si.processes()),
+            safePromise(si.chassis()), safePromise(si.graphics()),
+
+            safePromise(getWmicProperties('os', ['Caption', 'Version', 'OSArchitecture', 'WindowsDirectory', 'SystemDirectory'])),
+            safePromise(getWmicProperties('computersystem', ['Manufacturer', 'Model', 'Name'])),
+            safePromise(getWmicProperties('baseboard', ['Manufacturer', 'Product', 'Version'])),
+            safePromise(getWmicProperties('cpu', ['Name', 'NumberOfCores', 'NumberOfLogicalProcessors', 'MaxClockSpeed'])),
+            safePromise(getWmicProperties('path win32_videocontroller', ['Name', 'AdapterRAM']))
         ]);
-        const displaysFromElectron = screen.getAllDisplays().map(display => ({ id: display.id, resolution: `${display.size.width}x${display.size.height}`, scaleFactor: display.scaleFactor, colorDepth: display.colorDepth, isPrimary: display.bounds.x === 0 && display.bounds.y === 0 }));
-        return { osInfo: osData, users: userData, time: { uptime: os.uptime(), ...timeData, locale: app.getLocale() }, cpu: cpuData, mem: { ...memData, layout: memLayoutData }, networkInterfaces: networkData, system: { ...systemData, platformRole: chassisData?.type }, baseboard: baseboardData, bios: biosData, diskLayout: diskData, graphics: { ...graphicsData, displaysFromElectron }, versions: { app: app.getVersion(), electron: process.versions.electron, node: process.versions.node, ...versionsData }, processes: processesData };
-    } catch (e) { console.error('Error:', e); throw new Error('Info Error'); }
+        const displaysFromElectron = screen.getAllDisplays().map(display => ({
+            id: display.id, resolution: `${display.size.width}x${display.size.height}`,
+            scaleFactor: display.scaleFactor, colorDepth: display.colorDepth,
+            isPrimary: display.bounds.x === 0 && display.bounds.y === 0
+        }));
+        const totalVirtualMem = (memData?.total || 0) + (memData?.swaptotal || 0);
+        const freeVirtualMem = (memData?.available || 0) + (memData?.swapfree || 0);
+        const osWmic = wmicOs?.[0] || {};
+        const csWmic = wmicComputerSystem?.[0] || {};
+        const bbWmic = wmicBaseboard?.[0] || {};
+        const cpuWmic = wmicCpu?.[0] || {};
+        return {
+            osInfo: {
+                ...(osData || {}),
+                distro: osWmic.Caption || osData?.distro,
+                release: osWmic.Version || osData?.release,
+                arch: osWmic.OSArchitecture || osData?.arch,
+                hostname: csWmic.Name || osData?.hostname,
+                windowsDir: osWmic.WindowsDirectory || process.env.SystemRoot,
+                systemDir: osWmic.SystemDirectory || (process.env.SystemRoot + '\\system32'),
+                uefi: osData?.uefi
+            },
+            users: userData,
+            time: {
+                uptime: os.uptime(),
+                timezone: timeData?.timezone,
+                timezoneName: timeData?.timezoneName,
+                locale: app.getLocale()
+            },
+            cpu: {
+                ...(cpuData || {}),
+                brand: cpuWmic.Name || cpuData?.brand,
+                physicalCores: cpuWmic.NumberOfCores || cpuData?.physicalCores,
+                cores: cpuWmic.NumberOfLogicalProcessors || cpuData?.cores,
+                speed: cpuWmic.MaxClockSpeed ? (cpuWmic.MaxClockSpeed / 1000).toFixed(2) + ' GHz' : (cpuData?.speed || 0) + ' GHz',
+            },
+            mem: { ...memData, layout: memLayoutData, totalVirtual: totalVirtualMem, freeVirtual: freeVirtualMem },
+            networkInterfaces: networkData,
+            system: {
+                ...(systemData || {}),
+                manufacturer: csWmic.Manufacturer || systemData?.manufacturer,
+                model: csWmic.Model || systemData?.model,
+                platformRole: chassisData?.type || 'N/A'
+            },
+            baseboard: {
+                ...(baseboardData || {}),
+                manufacturer: bbWmic.Manufacturer || baseboardData?.manufacturer,
+                model: bbWmic.Product || baseboardData?.model,
+                version: bbWmic.Version || baseboardData?.version
+            },
+            bios: biosData,
+            diskLayout: diskData,
+            graphics: {
+                controllers: wmicVideoControllers?.map((vc, i) => ({
+                    model: vc.Name || graphicsData?.controllers[i]?.model,
+                    vram: vc.AdapterRAM ? vc.AdapterRAM / (1024 * 1024) : graphicsData?.controllers[i]?.vram,
+                    vendor: graphicsData?.controllers[i]?.vendor
+                })) || graphicsData?.controllers,
+                displays: graphicsData?.displays
+            },
+            displays: displaysFromElectron,
+            versions: {
+                app: app.getVersion(), electron: process.versions.electron,
+                node: versionsData?.node || process.versions.node,
+                npm: versionsData?.npm, v8: process.versions.v8,
+                chrome: process.versions.chrome
+            },
+            processes: processesData ? {
+                all: processesData.all,
+                running: processesData.running,
+                blocked: processesData.blocked,
+                sleeping: processesData.sleeping,
+                list: (processesData.list || []).map(p => ({
+                    pid: p.pid, name: p.name,
+                    cpu: p.cpu.toFixed(2), mem: p.mem.toFixed(2)
+                })).sort((a, b) => b.cpu - a.cpu)
+            } : null
+        };
+    } catch (e) {
+        console.error('获取系统信息时发生严重错误:', e);
+        throw new Error('无法获取详细系统信息');
+    }
 });
-ipcMain.handle('get-gpu-stats', async () => { try { const g = await si.graphics(); return g?.controllers?.map(c => ({ model: c.model, vendor: c.vendor, load: c.utilizationGpu, temperature: c.temperatureGpu })) || []; } catch { return []; } });
-ipcMain.handle('get-memory-update', async () => { try { const m = await si.mem(); return { free: (m.available / 1024 ** 3).toFixed(2), swapfree: (m.swapfree / 1024 ** 3).toFixed(2), usagePercentage: ((m.used / m.total) * 100).toFixed(2) }; } catch { return { free: 0, swapfree: 0, usagePercentage: 0 }; } });
-ipcMain.handle('get-realtime-stats', () => { try { const cur = process.cpuUsage(cpuUsage.prev), td = process.hrtime(cpuUsage.prevTime), el = td[0] * 1e9 + td[1]; cpuUsage.prev = process.cpuUsage(); cpuUsage.prevTime = process.hrtime(); if (el === 0) return { cpu: '0.00', uptime: '00:00:00' }; const pct = Math.min(100, ((cur.user + cur.system) / 1000 / (el / 1e6)) * 100), up = process.uptime(), h = Math.floor(up / 3600), m = Math.floor((up % 3600) / 60), s = Math.floor(up % 60); return { cpu: pct.toFixed(2), uptime: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` }; } catch { return { cpu: '0.00', uptime: '00:00:00' }; } });
-ipcMain.handle('compress-files', (event, data) => new Promise((resolve) => {
-    dialog.showSaveDialog(mainWindow, { title: 'Save Archive', defaultPath: `archive_${Date.now()}.${data.format}`, filters: [{ name: 'Archive', extensions: [data.format] }] }).then(res => {
-        if (res.canceled || !res.filePath) return resolve({ success: false, error: 'Cancel' });
-        const w = new Worker(compressionWorkerPath);
-        w.on('message', (msg) => { if (msg.status === 'complete') { resolve({ success: true, path: msg.path }); w.terminate(); } else if (msg.status === 'error') { resolve({ success: false, error: msg.error }); w.terminate(); } });
-        w.postMessage({ type: 'compress', data: { ...data, output: res.filePath } });
+ipcMain.handle('get-gpu-stats', async () => {
+    try {
+        const graphicsData = await si.graphics();
+        if (graphicsData && graphicsData.controllers) {
+            return graphicsData.controllers.map(gpu => ({
+                model: gpu.model,
+                vendor: gpu.vendor,
+                load: gpu.utilizationGpu,
+                temperature: gpu.temperatureGpu
+            }));
+        }
+        return [];
+    } catch (e) {
+        console.error("获取 GPU 信息失败:", e);
+        return [];
+    }
+});
+ipcMain.handle('get-memory-update', async () => {
+    const formatBytes = (bytes) => (bytes / (1024 ** 3)).toFixed(2);
+    try {
+        const mem = await si.mem();
+        return {
+            free: formatBytes(mem.available),
+            swapfree: formatBytes(mem.swapfree),
+            usagePercentage: ((mem.used / mem.total) * 100).toFixed(2)
+        };
+    } catch {
+        const freeMem = os.freemem();
+        const totalMem = os.totalmem();
+        return {
+            free: formatBytes(freeMem),
+            swapfree: 'N/A',
+            usagePercentage: (((totalMem - freeMem) / totalMem) * 100).toFixed(2)
+        };
+    }
+});
+ipcMain.handle('get-realtime-stats', () => {
+    try {
+        const currentUsage = process.cpuUsage(cpuUsage.prev);
+        const timeDiff = process.hrtime(cpuUsage.prevTime);
+        const elapsedTime = timeDiff[0] * 1e9 + timeDiff[1];
+        cpuUsage.prev = process.cpuUsage();
+        cpuUsage.prevTime = process.hrtime();
+        if (elapsedTime === 0) return { cpu: '0.00', uptime: '00:00:00' };
+        const totalUsage = (currentUsage.user + currentUsage.system) / 1000;
+        const percentage = Math.min(100, (totalUsage / (elapsedTime / 1e6)) * 100);
+        const uptimeSeconds = process.uptime();
+        const hours = Math.floor(uptimeSeconds / 3600);
+        const minutes = Math.floor((uptimeSeconds % 3600) / 60);
+        const seconds = Math.floor(uptimeSeconds % 60);
+        const formattedUptime = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        return { cpu: percentage.toFixed(2), uptime: formattedUptime };
+    } catch (error) {
+        console.error("获取实时状态失败 (非致命):", error);
+        return { cpu: '0.00', uptime: '00:00:00' };
+    }
+});
+
+function createAcknowledgementsWindow(theme) {
+    if (acknowledgementsWindow) { acknowledgementsWindow.focus(); return; }
+    const backgroundColor = theme === 'dark' ? '#1d1d1f' : '#ffffff';
+    acknowledgementsWindow = new BrowserWindow({
+        width: 400,
+        height: 420,
+        frame: false,
+        resizable: false,
+        show: false,
+        transparent: false,
+        backgroundColor: backgroundColor,
+        hasShadow: true,
+        skipTaskbar: true,
+        webPreferences: {
+            preload: path.join(__dirname, 'preload.js'),
+            contextIsolation: true,
+        }
     });
-}));
-ipcMain.handle('decompress-file', (event, data) => new Promise((resolve) => {
-    dialog.showOpenDialog(mainWindow, { title: 'Select Folder', properties: ['openDirectory'] }).then(res => {
-        if (res.canceled || !res.filePaths.length) return resolve({ success: false, error: 'Cancel' });
-        const w = new Worker(compressionWorkerPath);
-        w.on('message', (msg) => { if (msg.status === 'complete') { shell.openPath(msg.path); resolve({ success: true, path: msg.path }); w.terminate(); } else if (msg.status === 'error') { resolve({ success: false, error: msg.error }); w.terminate(); } });
-        w.postMessage({ type: 'decompress', data: { ...data, targetDir: res.filePaths[0] } });
+    acknowledgementsWindow.loadFile(path.join(__dirname, 'src/acknowledgements.html'), { query: { "theme": theme } });
+    acknowledgementsWindow.once('ready-to-show', () => {
+        acknowledgementsWindow.show();
     });
-}));
-function createToolWindow(viewName, toolId, theme) {
-    const k = `${viewName}_${toolId}`; if (toolWindows.has(k)) { const w = toolWindows.get(k); if (w) { if (w.isMinimized()) w.restore(); w.show(); w.focus(); return; } }
-    const w = new BrowserWindow({ width: 1200, height: 800, frame: false, show: false, transparent: true, hasShadow: false, resizable: true, webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, webviewTag: true, devTools: !app.isPackaged } });
-    const html = viewName === 'view-browser' ? 'src/views/view-browser.html' : 'src/views/view-tool.html';
-    w.loadFile(path.join(__dirname, html), { search: new URLSearchParams({ theme, tool: toolId || '' }).toString() });
-    w.once('ready-to-show', () => { w.show(); w.focus(); }); w.on('closed', () => toolWindows.delete(k)); toolWindows.set(k, w);
+    acknowledgementsWindow.on('closed', () => {
+        acknowledgementsWindow = null;
+    });
 }
-ipcMain.on('open-acknowledgements-window', (e, t, v) => { if (acknowledgementsWindow) { acknowledgementsWindow.focus(); return; } acknowledgementsWindow = new BrowserWindow({ width: 400, height: 520, frame: false, resizable: false, show: false, backgroundColor: t === 'dark' ? '#1d1d1f' : '#ffffff', hasShadow: true, skipTaskbar: true, webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true } }); acknowledgementsWindow.loadFile(path.join(__dirname, 'src/acknowledgements.html'), { search: new URLSearchParams({ theme: t, versions: JSON.stringify(v || {}) }).toString() }); acknowledgementsWindow.once('ready-to-show', () => acknowledgementsWindow.show()); acknowledgementsWindow.on('closed', () => acknowledgementsWindow = null); });
-ipcMain.on('open-secret-window', (e, t) => createToolWindow('view-browser', 'archive', t));
-ipcMain.on('open-tool-window', (e, v, i, t) => createToolWindow(v, i, t));
-ipcMain.on('close-current-window', (e) => BrowserWindow.fromWebContents(e.sender)?.close());
-ipcMain.on('secret-window-minimize', (e) => BrowserWindow.fromWebContents(e.sender)?.minimize());
-ipcMain.on('secret-window-maximize', (e) => { const w = BrowserWindow.fromWebContents(e.sender); if (w) w.isMaximized() ? w.unmaximize() : w.maximize(); });
-const iconDir = path.join(rootDir, 'data', 'icons'); if (!fs.existsSync(iconDir)) try { fs.mkdirSync(iconDir, { recursive: true }); } catch (e) { }
-const downloadFile = (url, dest) => new Promise((resolve, reject) => { const f = fs.createWriteStream(dest); https.get(url, r => { if (r.statusCode !== 200) reject(new Error(r.statusCode)); r.pipe(f); f.on('finish', () => f.close(resolve)); }).on('error', e => { fs.unlink(dest, () => { }); reject(e); }); });
-ipcMain.handle('get-cached-icon', async (e, id, url) => { if (!url) return null; const ext = path.extname(url) || '.svg'; const p = path.join(iconDir, `${id}${ext}`); if (fs.existsSync(p) && fs.statSync(p).size > 0) return `file://${p.replace(/\\/g, '/')}`; try { await downloadFile(url, p); return `file://${p.replace(/\\/g, '/')}`; } catch (e) { return null; } });
-const fontsDir = path.join(rootDir, 'data', 'fonts'); if (!fs.existsSync(fontsDir)) try { fs.mkdirSync(fontsDir, { recursive: true }); } catch (e) { }
-ipcMain.handle('download-font', async (e, { fontName, fontUrl }) => { const u = new URL(fontUrl); const ext = path.extname(u.pathname) || '.woff2'; const p = path.join(fontsDir, `${fontName.replace(/[^a-zA-Z0-9_-]/g, '_')}${ext}`); if (fs.existsSync(p) && fs.statSync(p).size > 102400) return { success: true, path: `file://${p.replace(/\\/g, '/')}`, cached: true }; try { await downloadFile(fontUrl, p); return { success: true, path: `file://${p.replace(/\\/g, '/')}`, cached: false }; } catch (e) { return { success: false, error: e.message }; } });
-ipcMain.handle('check-secret-access', async () => { const b = db.getConfig('secret_ip_ban_until'); if (b && Date.now() < parseInt(b)) return { status: 'ip-banned', until: parseInt(b) }; const ip = await getPublicIP(); if (ip && (await fetchIpBanList()).includes(ip)) { const t = Date.now() + 3600000; db.setConfig('secret_ip_ban_until', t.toString()); return { status: 'ip-banned', until: t }; } const l = db.getConfig('secret_code_lockout_until'); if (l && Date.now() < parseInt(l)) return { status: 'locked', until: parseInt(l) }; return { status: 'ok' }; });
-ipcMain.handle('record-secret-failure', () => { let a = parseInt(db.getConfig('secret_code_attempts') || '0') + 1; if (a >= 5) { const t = Date.now() + 3600000; db.setConfig('secret_code_lockout_until', t.toString()); db.setConfig('secret_code_attempts', '0'); return { isLocked: true, attemptsLeft: 0, lockoutUntil: t }; } db.setConfig('secret_code_attempts', a.toString()); return { isLocked: false, attemptsLeft: 5 - a }; });
-ipcMain.handle('reset-secret-attempts', () => { db.setConfig('secret_code_attempts', '0'); db.setConfig('secret_code_lockout_until', '0'); db.setConfig('secret_ip_ban_until', '0'); });
-ipcMain.on('request-new-window', (e, u, o) => { const p = BrowserWindow.fromWebContents(e.sender); const w = new BrowserWindow({ width: o.width || 1024, height: o.height || 768, parent: p || mainWindow, frame: true, autoHideMenuBar: true, webPreferences: { contextIsolation: true, sandbox: false, webviewTag: false } }); w.loadURL(u); w.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; }); });
+
+// 帮助函数：从事件中获取窗口
+function getWindowFromEvent(event) {
+    return BrowserWindow.fromWebContents(event.sender);
+}
+
+// 通用的工具窗口创建函数
+function createToolWindow(viewName, toolId, theme) {
+    // 检查窗口是否已打开
+    const windowKey = `${viewName}_${toolId || ''}`;
+    if (toolWindows.has(windowKey)) {
+        const existingWin = toolWindows.get(windowKey);
+        if (existingWin) {
+            existingWin.focus();
+            return;
+        }
+    }
+
+    let htmlFile = '';
+    let windowOptions = {
+        width: 1200, 
+        height: 800,
+        // parent: mainWindow, // <-- 设为主窗口的子窗口
+        // modal: false, // <-- 非模态，允许操作主窗口
+        frame: false, 
+        show: false, 
+        transparent: true, 
+        hasShadow: false, 
+        resizable: true,
+        webPreferences: {
+            preload: path.join(__dirname, 'preload.js'),
+            contextIsolation: true,
+            webviewTag: true,
+            devTools: !app.isPackaged // 开发时允许调试
+        }
+    };
+
+    // 根据 viewName 选择 HTML 文件和特定配置
+    switch (viewName) {
+        case 'view-browser':
+            htmlFile = path.join(__dirname, 'src/views/view-browser.html');
+            // 浏览器窗口可以有不同的默认大小
+            windowOptions.width = 1366;
+            windowOptions.height = 768;
+            break;
+            
+        case 'view-tool':
+            htmlFile = path.join(__dirname, 'src/views/view-tool.html');
+            // 自定义工具窗口默认大小
+            windowOptions.width = 1000;
+            windowOptions.height = 700;
+            break;
+
+        default:
+            console.error(`未知的视图名称: ${viewName}`);
+            return;
+    }
+
+    if (!htmlFile) return;
+
+    const newToolWin = new BrowserWindow(windowOptions);
+
+    // 将 toolId 和 theme 作为 URL query 参数传递给窗口
+    const urlQuery = new URLSearchParams({
+        theme: theme,
+        tool: toolId || ''
+    });
+    newToolWin.loadFile(htmlFile, { search: urlQuery.toString() });
+
+    newToolWin.once('ready-to-show', () => { newToolWin.show(); });
+    
+    newToolWin.on('closed', () => {
+        toolWindows.delete(windowKey);
+    });
+    
+    toolWindows.set(windowKey, newToolWin);
+}
+
+ipcMain.on('open-acknowledgements-window', (event, theme) => { createAcknowledgementsWindow(theme); });
+ipcMain.on('open-secret-window', (event, theme) => { 
+    // "神秘档案馆" 现在只是 "view-browser" 视图的一个特例
+    createToolWindow('view-browser', 'archive', theme); 
+});
+// 新增：处理来自 uiManager.js 的新请求
+ipcMain.on('open-tool-window', (event, viewName, toolId, theme) => {
+    createToolWindow(viewName, toolId, theme);
+});
+ipcMain.on('close-current-window', (event) => { const win = BrowserWindow.fromWebContents(event.sender); win?.close(); });
+
+// 修改：使其能控制任何发送事件的窗口
+ipcMain.on('secret-window-minimize', (event) => { 
+    const win = getWindowFromEvent(event);
+    win?.minimize(); 
+});
+ipcMain.on('secret-window-maximize', (event) => { 
+    const win = getWindowFromEvent(event);
+    if (win?.isMaximized()) { 
+        win.unmaximize(); 
+    } else { 
+        win?.maximize(); 
+    } 
+});
+
+ipcMain.handle('check-secret-access', async () => {
+    const ipBanUntil = db.getConfig('secret_ip_ban_until');
+    if (ipBanUntil && Date.now() < parseInt(ipBanUntil, 10)) {
+        return { status: 'ip-banned', until: parseInt(ipBanUntil, 10) };
+    }
+    const publicIp = await getPublicIP();
+    if (publicIp) {
+        const banList = await fetchIpBanList();
+        if (banList.includes(publicIp)) {
+            const banDuration = 60 * 60 * 1000;
+            const banEndTime = Date.now() + banDuration;
+            db.setConfig('secret_ip_ban_until', banEndTime.toString());
+            return { status: 'ip-banned', until: banEndTime };
+        }
+    }
+    const lockoutUntil = db.getConfig('secret_code_lockout_until');
+    if (lockoutUntil && Date.now() < parseInt(lockoutUntil, 10)) {
+        return { status: 'locked', until: parseInt(lockoutUntil, 10) };
+    }
+    return { status: 'ok' };
+});
+ipcMain.handle('record-secret-failure', () => {
+    let attempts = parseInt(db.getConfig('secret_code_attempts') || '0', 10);
+    attempts++;
+    const maxAttempts = 5;
+    if (attempts >= maxAttempts) {
+        const lockoutDuration = 60 * 60 * 1000;
+        const lockoutEndTime = Date.now() + lockoutDuration;
+        db.setConfig('secret_code_lockout_until', lockoutEndTime.toString());
+        db.setConfig('secret_code_attempts', '0');
+        return { isLocked: true, attemptsLeft: 0, lockoutUntil: lockoutEndTime };
+    } else {
+        db.setConfig('secret_code_attempts', attempts.toString());
+        return { isLocked: false, attemptsLeft: maxAttempts - attempts };
+    }
+});
+ipcMain.handle('reset-secret-attempts', () => {
+    db.setConfig('secret_code_attempts', '0');
+    db.setConfig('secret_code_lockout_until', '0');
+    db.setConfig('secret_ip_ban_until', '0');
+});
+
+// 新增：处理来自 webview 的新窗口请求
+ipcMain.on('request-new-window', (event, url, options) => {
+    console.log(`Received request to open new window: ${url}`);
+
+    // 获取触发事件的窗口 (通常是我们的浏览器工具窗口)
+    const openerWindow = BrowserWindow.fromWebContents(event.sender);
+
+    // 基础窗口选项
+    const windowOptions = {
+        width: options.width || 1024, // 使用建议的宽度，或默认值
+        height: options.height || 768, // 使用建议的高度，或默认值
+        parent: openerWindow || mainWindow, // 设置父窗口，使其行为更像弹窗
+        // modal: false, // 弹窗通常不是模态的
+        frame: true, // 弹窗通常需要标准框架以便用户控制
+        autoHideMenuBar: true, // **隐藏菜单栏**
+        // menuBarVisible: false, // 另一种隐藏菜单栏的方式
+        icon: nativeImage.createFromPath(APP_ICON_PATH), // **设置图标**
+        webPreferences: {
+            // 弹窗的 webPreferences - 保持默认安全设置
+            contextIsolation: true,
+            // preload: path.join(__dirname, 'preload_popup.js'), // 可以为弹窗指定不同的 preload
+            sandbox: false, // 根据需要设置 sandbox
+            // webSecurity: true, // 保持 webSecurity 开启
+            nodeIntegration: false, // 禁用 Node.js 集成
+            webviewTag: false, // 弹窗内部通常不需要再嵌入 webview
+            devTools: !app.isPackaged // 开发模式下允许打开开发者工具
+        }
+    };
+
+    // 如果原始窗口设置了 x, y，尝试在附近打开
+    if (options.x && options.y && openerWindow) {
+        const openerBounds = openerWindow.getBounds();
+        windowOptions.x = openerBounds.x + options.x;
+        windowOptions.y = openerBounds.y + options.y;
+    }
+
+    const newPopupWindow = new BrowserWindow(windowOptions);
+
+    // 加载 URL
+    newPopupWindow.loadURL(url);
+
+    // 可选：如果弹窗需要与其打开者通信，可以在这里设置 IPC 通道
+    // newPopupWindow.webContents.on('did-finish-load', () => {
+    //     newPopupWindow.webContents.send('opener-info', openerWindow.webContents.id);
+    // });
+
+    // 阻止窗口打开新窗口 (如果弹窗内部尝试 window.open) - 可选
+    newPopupWindow.webContents.setWindowOpenHandler(({ url: popupUrl }) => {
+         console.warn(`Blocked popup attempting to open: ${popupUrl}`);
+         shell.openExternal(popupUrl); // 或者在外部浏览器打开
+         return { action: 'deny' };
+     });
+
+    // 在关闭时清理引用 (如果需要管理这些弹窗的话)
+    // newPopupWindow.on('closed', () => { /* ... */ });
+});

@@ -1,4 +1,3 @@
-// src/js/tools/systemTool.js
 import BaseTool from '../baseTool.js';
 
 class SystemTool extends BaseTool {
@@ -46,11 +45,11 @@ class SystemTool extends BaseTool {
     render() {
         return `
             <div class="page-container" style="display: flex; flex-direction: column; height: 100%;">
-                <div class="section-header" style="flex-shrink: 0;">
+                <div class="section-header">
                     <button id="back-to-toolbox-btn" class="back-btn ripple"><i class="fas fa-arrow-left"></i> 返回工具箱</button>
                     <h1 style="flex-grow: 1; text-align: center;">${this.name}</h1>
                 </div>
-                <div id="system-tool-content" class="content-area" style="padding-top: 20px; flex-grow: 1; overflow-y: auto;">
+                <div id="system-tool-content" class="content-area" style="padding-top: 0; flex-grow: 1;">
                     <div class="loading-container">
                         <img src="./assets/loading.gif" alt="检查权限..." class="loading-gif">
                         <p class="loading-text">正在检查权限...</p>

@@ -2,233 +2,232 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>关于 & 鸣谢</title>
+    <title>更多信息</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <link rel="stylesheet" href="./css/style.css">
     <style>
-        /* --- 覆盖基础样式以适应独立窗口 --- */
         html, body {
             overflow: hidden;
-            background-color: transparent !important;
+            background-color: transparent; /* 实际颜色由 main.js 中的 backgroundColor 控制 */
             font-family: var(--font-family);
             color: var(--text-color);
-            margin: 0;
-            padding: 5px; /* 留出阴影空间 */
+        }
+
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
             height: 100vh;
+            padding: 20px;
             box-sizing: border-box;
         }
 
-        /* 继承主程序的玻璃框架 */
-        .ack-glass-frame {
-            display: flex;
-            flex-direction: column;
-            height: 100%;
+        .content-wrapper {
             width: 100%;
-            background: rgba(var(--card-background-rgb), 0.90);
-            backdrop-filter: blur(40px) saturate(180%);
-            border-radius: 20px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
-            overflow: hidden;
-            position: relative;
+            max-width: 280px;
+            text-align: center;
+            animation: contentFadeIn 0.5s forwards;
         }
 
-        /* 顶部标题栏 */
-        .ack-header {
-            height: 50px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 20px;
-            background: linear-gradient(to bottom, rgba(var(--bg-color-rgb), 0.5), transparent);
-            border-bottom: 1px solid rgba(128, 128, 128, 0.1);
+        .drag-region {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 40px;
             -webkit-app-region: drag;
-            flex-shrink: 0;
+            z-index: 100;
         }
 
-        .ack-title {
-            font-size: 16px;
-            font-weight: 700;
-            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
-            -webkit-background-clip: text;
-            background-clip: text;
-            -webkit-text-fill-color: transparent;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        .window-controls-btn {
-            width: 24px;
-            height: 24px;
-            border-radius: 50%;
-            border: none;
-            background: rgba(128, 128, 128, 0.1);
-            color: var(--text-secondary);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            transition: all 0.2s;
+        .window-controls-corner {
+            position: fixed;
+            top: 0;
+            right: 0;
+            z-index: 101;
             -webkit-app-region: no-drag;
         }
-        .window-controls-btn:hover {
-            background: var(--error-color);
-            color: white;
-            transform: rotate(90deg);
-        }
 
-        /* 内容滚动区 */
-        .ack-content {
-            flex-grow: 1;
-            overflow-y: auto;
+        .author-card {
+            background-color: rgba(var(--card-background-rgb), 0.7);
+            border: 1px solid var(--border-color);
+            border-radius: var(--border-radius);
             padding: 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
-        
-        .ack-content::-webkit-scrollbar { width: 4px; }
-        .ack-content::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 2px; }
-
-        /* 分组标题 */
-        .section-label {
-            font-size: 12px;
-            font-weight: 800;
-            color: var(--text-secondary);
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-bottom: 10px;
-            padding-left: 5px;
-            opacity: 0.8;
+            margin-bottom: 20px;
         }
 
-        /* 灵动岛卡片 */
-        .island-link-card {
+        .author-avatar {
+            width: 70px;
+            height: 70px;
+            border-radius: 50%;
+            margin: 0 auto 12px;
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
             display: flex;
             align-items: center;
-            background: rgba(var(--bg-color-rgb), 0.5);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 15px;
+            justify-content: center;
+            font-size: 32px;
+            color: white;
+            box-shadow: 0 4px 15px rgba(var(--primary-rgb), 0.3);
+        }
+
+        .author-name {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .author-desc {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 18px;
+        }
+
+        .author-links {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+
+        .link-btn {
+            border-radius: 12px;
+            padding: 8px 14px;
             cursor: pointer;
-            transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            font-weight: 600;
+            font-size: 13px;
+            border: 1px solid var(--border-color);
+            background-color: transparent;
+            color: var(--text-secondary);
+            transition: all 0.2s ease;
             position: relative;
             overflow: hidden;
         }
 
-        .island-link-card:hover {
-            transform: translateY(-3px);
-            background: rgba(var(--card-background-rgb), 0.8);
-            border-color: rgba(var(--primary-rgb), 0.4);
-            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
+        .link-btn:hover {
+            color: var(--primary-color);
+            border-color: var(--primary-color);
+            background-color: var(--border-color);
         }
 
-        .island-icon {
-            width: 40px;
-            height: 40px;
-            border-radius: 12px;
-            background: rgba(var(--primary-rgb), 0.1);
-            color: var(--primary-color);
+        .thanks-section h3 {
+            font-size: 15px;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 20px;
-            margin-right: 15px;
-            flex-shrink: 0;
+            gap: 8px;
         }
 
-        .island-text {
-            flex-grow: 1;
-        }
-        .island-text h4 { margin: 0 0 4px 0; font-size: 15px; color: var(--text-color); }
-        .island-text p { margin: 0; font-size: 12px; color: var(--text-secondary); opacity: 0.8; }
-
-        .island-arrow {
-            color: var(--text-secondary);
-            opacity: 0.5;
-            transition: transform 0.3s;
-        }
-        .island-link-card:hover .island-arrow {
-            opacity: 1;
-            color: var(--primary-color);
-            transform: translateX(3px);
-        }
-
-        /* 环境信息列表 */
-        .env-list {
-            background: rgba(var(--bg-color-rgb), 0.3);
-            border-radius: 16px;
-            padding: 10px;
-            border: 1px solid var(--border-color);
-        }
-        
-        .env-item {
+        /* --- 修改：增加 thanks-list 容器 --- */
+        .thanks-list {
             display: flex;
-            justify-content: space-between;
-            padding: 10px;
-            font-size: 13px;
-            border-bottom: 1px dashed var(--border-color);
+            flex-direction: column;
+            gap: 10px; /* 条目之间的间距 */
         }
-        .env-item:last-child { border-bottom: none; }
-        .env-key { color: var(--text-secondary); font-weight: 600; }
-        .env-val { color: var(--text-color); font-family: 'Consolas', monospace; }
 
+        .thanks-item {
+            background-color: rgba(var(--card-background-rgb), 0.5);
+            border-radius: 12px;
+            padding: 12px 15px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-align: left;
+            cursor: pointer;
+            position: relative; /* 新增：为水波纹效果提供定位上下文 */
+            overflow: hidden;  /* 新增：确保水波纹效果不会超出边界 */
+            transition: all 0.2s ease-in-out; /* 新增：为悬停效果添加平滑过渡 */
+        }
+
+        /* --- 新增：悬停效果 --- */
+        .thanks-item:hover {
+            background-color: rgba(var(--card-background-rgb), 0.8);
+            transform: translateY(-3px); /* 向上浮起 */
+            box-shadow: 0 6px 15px var(--shadow-color-hover); /* 添加阴影 */
+        }
+
+        /* --- 新增：点击时（Active状态）的即时反馈 --- */
+        .thanks-item:active {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px var(--shadow-color-hover);
+        }
+
+        .thanks-item .icon {
+            font-size: 18px;
+            color: var(--primary-color);
+            width: 20px;
+            text-align: center;
+            flex-shrink: 0; /* 防止图标被压缩 */
+        }
+
+        .thanks-item .text-content strong {
+            font-size: 14px;
+        }
+
+        /* --- 新增：水波纹动画效果 --- */
+        .ripple-effect {
+            position: absolute;
+            border-radius: 50%;
+            background-color: rgba(255, 255, 255, 0.6);
+            transform: scale(0);
+            animation: ripple-animation 600ms linear;
+            pointer-events: none;
+        }
+
+        @keyframes ripple-animation {
+            to {
+                transform: scale(4);
+                opacity: 0;
+            }
+        }
+
+        @keyframes contentFadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
     </style>
 </head>
 <body>
-    <div class="ack-glass-frame">
-        <div class="ack-header">
-            <div class="ack-title">
-                <i class="fas fa-feather-alt"></i> 关于 & 鸣谢
+    <div class="drag-region"></div>
+    <div class="window-controls-corner">
+        <button id="close-btn" class="window-control-btn" title="关闭">
+            <i class="fas fa-times"></i>
+        </button>
+    </div>
+
+    <div class="content-wrapper">
+        <div class="author-card">
+            <div class="author-avatar">
+                <i class="fas fa-user-astronaut"></i>
             </div>
-            <button id="close-btn" class="window-controls-btn" title="关闭">
-                <i class="fas fa-times"></i>
-            </button>
+            <h2 class="author-name">YMHUT</h2>
+            <p class="author-desc">开发者 & 设计者</p>
+            <div class="author-links">
+                <button class="link-btn ripple" id="author-website-btn"><i class="fas fa-globe"></i> 官网</button>
+                <button class="link-btn ripple" id="feedback-btn"><i class="fas fa-envelope"></i> 反馈</button>
+            </div>
         </div>
 
-        <div class="ack-content">
-            
-            <div>
-                <div class="section-label">核心数据源 (Data Providers)</div>
-                <div style="display: flex; flex-direction: column; gap: 10px;">
-                    
-                    <div class="island-link-card ripple" id="suyan-api-link">
-                        <div class="island-icon"><i class="fas fa-server"></i></div>
-                        <div class="island-text">
-                            <h4>素颜 API</h4>
-                            <p>稳定高效的综合数据接口服务</p>
-                        </div>
-                        <i class="fas fa-chevron-right island-arrow"></i>
+        <div class="thanks-section">
+            <h3><i class="fas fa-heart"></i> 特别鸣谢</h3>
+            <div class="thanks-list">
+                <div class="thanks-item ripple" id="suyan-api-link">
+                    <div class="icon"><i class="fas fa-server"></i></div>
+                    <div class="text-content">
+                        <strong>素颜API</strong>
                     </div>
-
-                    <div class="island-link-card ripple" id="uapipro-link">
-                        <div class="island-icon"><i class="fas fa-cogs"></i></div>
-                        <div class="island-text">
-                            <h4>UApiPro</h4>
-                            <p>专业的企业级 API 解决方案</p>
-                        </div>
-                        <i class="fas fa-chevron-right island-arrow"></i>
-                    </div>
-
-                    <div class="island-link-card ripple" id="nsuuu-api-link">
-                        <div class="island-icon"><i class="fas fa-cloud-sun"></i></div>
-                        <div class="island-text">
-                            <h4>鸭梨 API</h4>
-                            <p>精准的天气与生活服务数据支持</p>
-                        </div>
-                        <i class="fas fa-chevron-right island-arrow"></i>
-                    </div>
-
                 </div>
-            </div>
-
-            <div id="env-section" style="display: none;">
-                <div class="section-label">运行环境 (Runtime Info)</div>
-                <div id="env-list" class="env-list">
+                <div class="thanks-item ripple" id="uapipro-link">
+                    <div class="icon"><i class="fas fa-cogs"></i></div>
+                    <div class="text-content">
+                        <strong>UApiPro</strong>
                     </div>
+                </div>
+                
             </div>
-
         </div>
     </div>
 
@@ -238,48 +237,37 @@
         document.body.setAttribute('data-theme', theme);
 
         document.getElementById('close-btn').addEventListener('click', () => window.electronAPI.closeCurrentWindow());
-        
-        // 绑定鸣谢链接
-        const openLink = (url) => window.electronAPI.openExternalLink(url);
-        document.getElementById('suyan-api-link').addEventListener('click', () => openLink('https://api.suyanw.cn'));
-        document.getElementById('uapipro-link').addEventListener('click', () => openLink('http://uapis.cn'));
-        document.getElementById('nsuuu-api-link').addEventListener('click', () => openLink('https://api.nsuuu.com'));
+        document.getElementById('suyan-api-link').addEventListener('click', () => window.electronAPI.openExternalLink('https://api.suyanw.cn'));
+        document.getElementById('uapipro-link').addEventListener('click', () => window.electronAPI.openExternalLink('http://uapis.cn')); // <-- 新增事件监听
+        document.getElementById('author-website-btn').addEventListener('click', () => window.electronAPI.openExternalLink('https://ymhut.cn'));
+        document.getElementById('feedback-btn').addEventListener('click', () => window.electronAPI.openExternalLink('mailto:ymhut@qq.com'));
 
-        // 渲染环境信息
-        try {
-            const versionsString = urlParams.get('versions');
-            if (versionsString && versionsString !== '{}') {
-                const versions = JSON.parse(versionsString);
-                const container = document.getElementById('env-list');
-                const section = document.getElementById('env-section');
-                
-                let html = '';
-                const formatKey = (k) => k.charAt(0).toUpperCase() + k.slice(1);
-                
-                // 优先展示
-                const priority = ['app_version', 'electron', 'node', 'chromium'];
-                
-                priority.forEach(key => {
-                    if (versions[key]) {
-                        html += `<div class="env-item"><span class="env-key">${formatKey(key)}</span><span class="env-val">${versions[key]}</span></div>`;
-                    }
-                });
+        // --- 新增：为该独立窗口添加水波纹点击效果的逻辑 ---
+        document.addEventListener('click', function (e) {
+            const target = e.target.closest('.ripple');
+            if (target) {
+                const rect = target.getBoundingClientRect();
+                const ripple = document.createElement('span');
+                const diameter = Math.max(target.clientWidth, target.clientHeight);
+                const radius = diameter / 2;
 
-                // 其他信息
-                for (const [key, value] of Object.entries(versions)) {
-                    if (!priority.includes(key) && key !== 'last_checked_date' && value) {
-                        html += `<div class="env-item"><span class="env-key">${formatKey(key)}</span><span class="env-val">${value}</span></div>`;
-                    }
+                ripple.style.width = ripple.style.height = `${diameter}px`;
+                ripple.style.left = `${e.clientX - rect.left - radius}px`;
+                ripple.style.top = `${e.clientY - rect.top - radius}px`;
+                ripple.classList.add('ripple-effect');
+
+                const existingRipple = target.querySelector('.ripple-effect');
+                if (existingRipple) {
+                    existingRipple.remove();
                 }
 
-                if (html) {
-                    container.innerHTML = html;
-                    section.style.display = 'block';
-                }
+                target.appendChild(ripple);
+
+                setTimeout(() => {
+                    ripple.remove();
+                }, 600);
             }
-        } catch (e) {
-            console.error('环境信息加载失败', e);
-        }
+        });
     </script>
 </body>
 </html>

@@ -1,172 +1,252 @@
-// src/js/tools/systemTool.js
 import BaseTool from '../baseTool.js';
 
-class SystemTool extends BaseTool {
+class SystemInfoTool extends BaseTool {
     constructor() {
-        super('system-tool', '系统工具');
-        this.isAdmin = false; // 保存管理员权限状态
-        
-        // 扩充后的工具列表
-        this.tools = [
-            // 常用工具
-            { id: 'calc', name: '计算器', icon: 'fa-calculator', command: 'calc' },
-            { id: 'notepad', name: '记事本', icon: 'fa-file-alt', command: 'notepad' },
-            { id: 'mspaint', name: '画图', icon: 'fa-paint-brush', command: 'mspaint' },
-            { id: 'snippingtool', name: '截图工具', icon: 'fa-cut', command: 'snippingtool' },
-            { id: 'osk', name: '屏幕键盘', icon: 'fa-keyboard', command: 'osk' },
-            { id: 'charmap', name: '字符映射表', icon: 'fa-font', command: 'charmap' },
-            // 音频与多媒体
-            { id: 'soundrecorder', name: '录音机', icon: 'fa-microphone', command: 'ms-winsoundrecorder:' },
-            { id: 'sound', name: '声音设置', icon: 'fa-volume-up', command: 'mmsys.cpl' },
-            // 系统与诊断
-            { id: 'clock', name: '时钟', icon: 'fa-clock', command: 'ms-clock:' },
-            { id: 'control', name: '控制面板', icon: 'fa-sliders-h', command: 'control' },
-            { id: 'dxdiag', name: 'DirectX诊断', icon: 'fa-gamepad', command: 'dxdiag' },
-            { id: 'mstsc', name: '远程桌面', icon: 'fa-headset', command: 'mstsc' },
-            // 需要管理员权限的工具
-            { id: 'taskmgr', name: '任务管理器', icon: 'fa-tasks', command: 'taskmgr', requiresAdmin: true },
-            { id: 'power', name: '电源选项', icon: 'fa-battery-full', command: 'powercfg.cpl', requiresAdmin: true },
-            { id: 'display', name: '桌面/分辨率', icon: 'fa-desktop', command: 'desk.cpl', requiresAdmin: true },
-            { id: 'system', name: '系统属性', icon: 'fa-cogs', command: 'sysdm.cpl', requiresAdmin: true },
-            { id: 'regedit', name: '注册表编辑器', icon: 'fa-list-alt', command: 'regedit', requiresAdmin: true },
-            { id: 'services', name: '服务', icon: 'fa-running', command: 'services.msc', requiresAdmin: true },
-            { id: 'devmgmt', name: '设备管理器', icon: 'fa-microchip', command: 'devmgmt.msc', requiresAdmin: true },
-            { id: 'diskmgmt', name: '磁盘管理', icon: 'fa-hdd', command: 'diskmgmt.msc', requiresAdmin: true },
-            { id: 'perfmon', name: '性能监视器', icon: 'fa-tachometer-alt', command: 'perfmon.msc', requiresAdmin: true },
-            { id: 'msconfig', name: '系统配置', icon: 'fa-cog', command: 'msconfig', requiresAdmin: true },
-            { id: 'eventvwr', name: '事件查看器', icon: 'fa-clipboard-list', command: 'eventvwr.msc', requiresAdmin: true },
-            { id: 'gpedit', name: '组策略编辑器', icon: 'fa-list-ul', command: 'gpedit.msc', requiresAdmin: true },
-            { id: 'compmgmt', name: '计算机管理', icon: 'fa-laptop-medical', command: 'compmgmt.msc', requiresAdmin: true },
-            { id: 'cleanmgr', name: '磁盘清理', icon: 'fa-broom', command: 'cleanmgr', requiresAdmin: true },
-            { id: 'ncpa', name: '网络连接', icon: 'fa-network-wired', command: 'ncpa.cpl', requiresAdmin: true },
-        ];
+        super('system-info', '系统信息');
+        this.sysData = null;
+        this.memoryInterval = null;
     }
 
-    // 渲染静态框架
     render() {
-        // [修改] 确保 id="system-tool-content" 存在且样式正确
         return `
             <div class="page-container" style="display: flex; flex-direction: column; height: 100%;">
-                <div class="section-header" style="flex-shrink: 0;">
+                <div class="section-header">
                     <button id="back-to-toolbox-btn" class="back-btn ripple"><i class="fas fa-arrow-left"></i> 返回工具箱</button>
                     <h1 style="flex-grow: 1; text-align: center;">${this.name}</h1>
                 </div>
-                <div id="system-tool-content" class="content-area" style="padding-top: 20px; flex-grow: 1; overflow-y: auto;">
+                <div id="sys-info-content-wrapper" style="flex-grow: 1; overflow-y: auto;">
                     <div class="loading-container">
-                        <img src="./assets/loading.gif" alt="检查权限..." class="loading-gif">
-                        <p class="loading-text">正在检查权限...</p>
+                        <img src="./assets/loading.gif" alt="加载中..." class="loading-gif">
+                        <p class="loading-text">正在获取系统信息...</p>
                     </div>
                 </div>
-            </div>`;
+            </div>
+        `;
     }
 
-    // 初始化时检查权限，然后渲染网格
     async init() {
-        this._log('工具已初始化，正在检查管理员权限...');
+        this._log('工具已初始化');
         document.getElementById('back-to-toolbox-btn')?.addEventListener('click', () => {
              window.mainPage.navigateTo('toolbox');
              window.mainPage.updateActiveNavButton(document.getElementById('toolbox-btn'));
         });
-        
-        const permResult = await window.electronAPI.checkAndRelaunchAsAdmin();
-        if (permResult.relaunching) {
-            const contentContainer = document.getElementById('system-tool-content');
-            if(contentContainer) {
-                contentContainer.innerHTML = `<div class="loading-container"><p class="loading-text">正在以管理员身份重启应用...</p></div>`;
+
+        try {
+            this.sysData = await window.electronAPI.getSystemInfo();
+            this._log('成功获取系统信息');
+            const contentWrapper = document.getElementById('sys-info-content-wrapper');
+            if (contentWrapper) {
+                contentWrapper.innerHTML = this._buildHtml();
+                this._bindTabEvents();
+                this._startMemoryUpdates();
             }
-            return; 
-        }
-
-        this.isAdmin = permResult.isAdmin;
-        this._log(`当前管理员状态: ${this.isAdmin}`);
-        this._renderGridView();
-    }
-    
-    // 渲染工具网格
-    _renderGridView() {
-        const contentContainer = document.getElementById('system-tool-content');
-        if (!contentContainer) return;
-
-        // 对工具列表进行排序，便于查找
-        const sortedTools = [...this.tools].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
-
-        contentContainer.innerHTML = `
-            <div class="toolbox-grid">
-                ${sortedTools.map(tool => {
-                    const isDisabled = tool.requiresAdmin && !this.isAdmin;
-                    return `
-                        <div class="tool-card ${isDisabled ? 'disabled' : ''}" data-tool-id="${tool.id}">
-                            <div class="tool-icon">
-                                <i class="fas ${tool.icon}"></i>
-                            </div>
-                            <h2>${tool.name}</h2>
-                            <p>${isDisabled ? '需要管理员权限' : `启动 ${tool.command}`}</p>
-                            ${isDisabled ? '<div style="position: absolute; top: 12px; right: 12px;"><i class="fas fa-lock" style="color: var(--error-color);"></i></div>' : ''}
-                        </div>
-                    `;
-                }).join('')}
-            </div>`;
-        
-        this._bindGridEvents();
-        this._fadeInContent('.tool-card');
-    }
-
-    // 绑定网格点击事件
-    _bindGridEvents() {
-        document.querySelectorAll('#system-tool-content .tool-card').forEach(card => {
-            const toolId = card.dataset.toolId;
-            const tool = this.tools.find(t => t.id === toolId);
-            if (!tool) return;
-
-            if (card.classList.contains('disabled')) {
-                card.addEventListener('click', () => {
-                    this._notify('权限不足', '此工具需要以管理员身份运行本软件才能打开。', 'error');
-                });
-            } else {
-                card.addEventListener('click', () => {
-                    // 对于非管理员也可启动的工具，不再弹出确认框，直接启动
-                    if (!tool.requiresAdmin) {
-                        this._log(`用户启动: ${tool.name} (${tool.command})`);
-                        window.electronAPI.launchSystemTool(tool.command);
-                    } else {
-                        // 对于需要管理员权限的工具，保留确认框
-                        this._handleExternalTool(tool.command, tool.name);
-                    }
-                });
+        } catch (error) {
+            this._log(`获取系统信息失败: ${error.message}`);
+            this._notify('错误', '无法获取系统信息', 'error');
+            const contentWrapper = document.getElementById('sys-info-content-wrapper');
+            if (contentWrapper) {
+                contentWrapper.innerHTML = `<div class="loading-container"><p class="error-message">获取详细系统信息时出错。</p></div>`;
             }
-        });
-    }
-
-    // 外部工具处理器
-    async _handleExternalTool(command, toolName) {
-        const result = await window.electronAPI.showConfirmationDialog({
-            title: '操作确认',
-            message: `您确定要启动系统工具“${toolName}”吗？`,
-            detail: `即将执行命令: ${command}`
-        });
-
-        if (result.response === 0) { // 0 代表 "确定"
-            this._log(`用户授权启动: ${toolName} (${command})`);
-            window.electronAPI.launchSystemTool(command);
-        } else {
-            this._log(`用户取消启动: ${toolName}`);
         }
     }
-    
-    // 动画触发辅助函数
-    _fadeInContent(selector) {
-        document.querySelectorAll(selector).forEach((el, i) => {
-            el.style.animation = 'none';
-            el.offsetHeight; // 强制浏览器重绘
-            el.style.animation = `contentFadeIn 0.5s cubic-bezier(0.25, 0.8, 0.25, 1) forwards ${i * 0.05}s`;
-        });
-    }
 
-    // 重写 destroy 方法
     destroy() {
-        this._log('工具已销毁');
-        super.destroy(); // 调用父类的 destroy 方法
+        if (this.memoryInterval) {
+            clearInterval(this.memoryInterval);
+        }
+        this._log('工具已销毁，动态更新已停止');
+    }
+
+    _startMemoryUpdates() {
+        this.memoryInterval = setInterval(async () => {
+            try {
+                const memUpdate = await window.electronAPI.getMemoryUpdate();
+                document.getElementById('mem-available-value').textContent = `${memUpdate.free} GB`;
+                document.getElementById('mem-virtual-available-value').textContent = `${(parseFloat(memUpdate.free) + parseFloat(memUpdate.swapfree)).toFixed(2)} GB`;
+                
+                const memUsageText = document.getElementById('mem-usage-text');
+                const memUsageBar = document.getElementById('mem-usage-bar-inner');
+                if(memUsageText) memUsageText.textContent = `${memUpdate.usagePercentage}%`;
+                if(memUsageBar) memUsageBar.style.width = `${memUpdate.usagePercentage}%`;
+
+            } catch (error) {
+                console.error("无法更新内存信息:", error);
+                if (this.memoryInterval) clearInterval(this.memoryInterval);
+            }
+        }, 2000);
+    }
+
+    _bindTabEvents() {
+        const tabs = document.querySelectorAll('.sys-info-tab');
+        const contents = document.querySelectorAll('.sys-info-content');
+        
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const targetId = tab.dataset.tab;
+                tabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                contents.forEach(content => {
+                    if (content.id === targetId) content.classList.add('active');
+                    else content.classList.remove('active');
+                });
+            });
+        });
+    }
+    
+    _buildHtml() {
+        const data = this.sysData;
+        if (!data) return '<p class="error-message">未能加载系统信息。</p>';
+        
+        const formatUptime = (seconds) => {
+            const days = Math.floor(seconds / 86400); seconds %= 86400;
+            const hours = Math.floor(seconds / 3600); seconds %= 3600;
+            const minutes = Math.floor(seconds / 60);
+            return `${days} 天 ${hours} 小时 ${minutes} 分钟`;
+        };
+
+        const formatBytes = (bytes, targetUnit = 'GB') => {
+            if (bytes === 0 || !bytes) return '0 ' + targetUnit;
+            const units = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+            const power = units.indexOf(targetUnit);
+            if (power === -1) return (bytes / (1024 ** 2)).toFixed(2) + ' MB';
+            return (bytes / (1024 ** power)).toFixed(2) + ' ' + targetUnit;
+        }
+        
+        const renderInfoItem = (label, value) => `<div class="info-item"><span class="info-label">${label}</span><span class="info-value">${value || 'N/A'}</span></div>`;
+
+        const versionItems = Object.entries(data.versions)
+            .filter(([key, value]) => value && !['app', 'electron', 'node', 'v8', 'chrome'].includes(key))
+            .map(([key, value]) => `<div class="info-grid compact">${renderInfoItem(key, value)}</div>`)
+            .join('');
+
+        return `
+            <div class="sys-info-tabs">
+                <button class="sys-info-tab active" data-tab="tab-summary"><i class="fas fa-clipboard-list"></i> 系统摘要</button>
+                <button class="sys-info-tab" data-tab="tab-hardware"><i class="fas fa-hdd"></i> 硬件资源</button>
+                <button class="sys-info-tab" data-tab="tab-network"><i class="fas fa-network-wired"></i> 网络接口</button>
+                <button class="sys-info-tab" data-tab="tab-versions"><i class="fas fa-code-branch"></i> 软件环境</button>
+                <button class="sys-info-tab" data-tab="tab-processes"><i class="fas fa-tasks"></i> 运行进程</button>
+            </div>
+            <div class="sys-info-content-container">
+                <div id="tab-summary" class="sys-info-content active">
+                    <div class="info-grid">${renderInfoItem('操作系统名称', data.osInfo.distro)}</div>
+                    <div class="info-grid">${renderInfoItem('版本', data.osInfo.release)}</div>
+                    <div class="info-grid">${renderInfoItem('系统名称', data.osInfo.hostname)}</div>
+                    <div class="info-grid">${renderInfoItem('系统制造商', data.system.manufacturer)}</div>
+                    <div class="info-grid">${renderInfoItem('系统型号', data.system.model)}</div>
+                    <div class="info-grid">${renderInfoItem('系统类型', `${data.osInfo.arch} PC`)}</div>
+                    <div class="info-grid">${renderInfoItem('处理器', `${data.cpu.brand}, ${data.cpu.physicalCores} 核, ${data.cpu.cores} 逻辑处理器`)}</div>
+                    <div class="info-grid">${renderInfoItem('BIOS 版本/日期', `${data.bios.vendor} ${data.bios.version}, ${data.bios.releaseDate}`)}</div>
+                    <div class="info-grid">${renderInfoItem('SMBIOS 版本', data.bios.smbiosVersion)}</div>
+                    <div class="info-grid">${renderInfoItem('BIOS 模式', data.osInfo.uefi ? 'UEFI' : 'Legacy')}</div>
+                    <div class="info-grid">${renderInfoItem('主板产品', `${data.baseboard.manufacturer} ${data.baseboard.model}`)}</div>
+                    <div class="info-grid">${renderInfoItem('平台角色', data.system.platformRole)}</div>
+                    <div class="info-grid">${renderInfoItem('Windows 目录', data.osInfo.windowsDir)}</div>
+                    <div class="info-grid">${renderInfoItem('区域设置', data.time.locale)}</div>
+                    <div class="info-grid">${renderInfoItem('时区', data.time.timezoneName)}</div>
+                    <div class="info-grid">${renderInfoItem('已安装的物理内存(RAM)', formatBytes(data.mem.total))}</div>
+                    <div class="info-grid">${renderInfoItem('总的物理内存', formatBytes(data.mem.total))}</div>
+                    <div class="info-grid">${renderInfoItem('可用物理内存', `<span id="mem-available-value">${formatBytes(data.mem.available)}</span>`)}</div>
+                    <div class="info-grid">${renderInfoItem('总的虚拟内存', formatBytes(data.mem.totalVirtual))}</div>
+                    <div class="info-grid">${renderInfoItem('可用虚拟内存', `<span id="mem-virtual-available-value">${formatBytes(data.mem.freeVirtual)}</span>`)}</div>
+                    <div class="info-grid">${renderInfoItem('页面文件空间', formatBytes(data.mem.swaptotal))}</div>
+                </div>
+                
+                <div id="tab-hardware" class="sys-info-content">
+                    <h3>内存条信息</h3>
+                    ${data.mem.layout.map((stick, index) => `
+                        <div class="network-card">
+                            <h4>内存插槽 ${index + 1}</h4>
+                            <div class="info-grid compact">${renderInfoItem('容量', formatBytes(stick.size))}</div>
+                            <div class="info-grid compact">${renderInfoItem('类型', stick.type)}</div>
+                            <div class="info-grid compact">${renderInfoItem('频率', stick.clockSpeed ? stick.clockSpeed + ' MHz' : 'N/A')}</div>
+                            <div class="info-grid compact">${renderInfoItem('制造商', stick.manufacturer)}</div>
+                        </div>
+                    `).join('')}
+                    <h3>磁盘驱动器</h3>
+                    ${data.diskLayout.map(disk => `
+                        <div class="network-card">
+                            <h4>${disk.name || disk.device} (${disk.type})</h4>
+                             <div class="info-grid compact">${renderInfoItem('厂商', disk.vendor)}</div>
+                             <div class="info-grid compact">${renderInfoItem('容量', formatBytes(disk.size))}</div>
+                        </div>
+                    `).join('')}
+                    <h3>显示控制器</h3>
+                     ${data.graphics.controllers.map((controller, index) => `
+                        <div class="network-card">
+                            <h4>显卡 ${index + 1}</h4>
+                            <div class="info-grid compact">${renderInfoItem('型号', controller.model)}</div>
+                            <div class="info-grid compact">${renderInfoItem('制造商', controller.vendor)}</div>
+                            <div class="info-grid compact">${renderInfoItem('显存', formatBytes(controller.vram, 'MB'))}</div>
+                        </div>
+                    `).join('')}
+                    <h3>显示器</h3>
+                     ${data.displays.map((display, index) => `
+                        <div class="network-card">
+                            <h3>显示器 ${index + 1} ${display.isPrimary ? '(主显示器)' : ''}</h3>
+                            <div class="info-grid compact">${renderInfoItem('分辨率', display.resolution)}</div>
+                            <div class="info-grid compact">${renderInfoItem('缩放因子', display.scaleFactor)}</div>
+                            <div class="info-grid compact">${renderInfoItem('色深', display.colorDepth)}</div>
+                        </div>
+                    `).join('')}
+                </div>
+                <div id="tab-network" class="sys-info-content">
+                    ${data.networkInterfaces.map(net => `
+                        <div class="network-card">
+                            <h3>${net.ifaceName} ${net.default ? '(默认)' : ''}</h3>
+                            <div class="info-grid compact">${renderInfoItem('IPv4 地址', net.ip4)}</div>
+                            <div class="info-grid compact">${renderInfoItem('IPv6 地址', net.ip6)}</div>
+                            <div class="info-grid compact">${renderInfoItem('MAC 地址', net.mac)}</div>
+                            <div class="info-grid compact">${renderInfoItem('速度', (net.speed || 0) + ' Mbps')}</div>
+                        </div>
+                    `).join('')}
+                </div>
+                 <div id="tab-versions" class="sys-info-content">
+                    <div class="network-card">
+                        <h3>核心环境</h3>
+                         <div class="info-grid compact">${renderInfoItem('YMhut Box', data.versions.app)}</div>
+                         <div class="info-grid compact">${renderInfoItem('Electron', data.versions.electron)}</div>
+                         <div class="info-grid compact">${renderInfoItem('Node.js', data.versions.node)}</div>
+                         <div class="info-grid compact">${renderInfoItem('Chromium', data.versions.chrome)}</div>
+                         <div class="info-grid compact">${renderInfoItem('V8 Engine', data.versions.v8)}</div>
+                    </div>
+                     <div class="network-card">
+                        <h3>其他软件 (已检测到)</h3>
+                        ${versionItems || '<p style="padding: 10px;">未检测到其他相关软件。</p>'}
+                    </div>
+                </div>
+                <div id="tab-processes" class="sys-info-content">
+                    <div class="info-grid" style="grid-template-columns: repeat(4, 1fr); gap: 10px;">
+                        <div>总进程: <b>${data.processes.all}</b></div>
+                        <div>运行中: <b>${data.processes.running}</b></div>
+                        <div>阻塞: <b>${data.processes.blocked}</b></div>
+                        <div>休眠: <b>${data.processes.sleeping}</b></div>
+                    </div>
+                    <table class="ip-comparison-table" style="margin-top: 20px;">
+                        <thead>
+                            <tr>
+                                <th>PID</th>
+                                <th>进程名</th>
+                                <th>CPU (%)</th>
+                                <th>内存 (%)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${data.processes.list.slice(0, 100).map(p => `
+                                <tr>
+                                    <td>${p.pid}</td>
+                                    <td style="word-break: break-all;">${p.name}</td>
+                                    <td>${p.cpu}</td>
+                                    <td>${p.mem}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                    <p class="comparison-note">仅显示CPU占用率最高的100个进程。</p>
+                </div>
+            </div>
+        `;
     }
 }
 
-export default SystemTool;
+export default SystemInfoTool;

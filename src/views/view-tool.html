@@ -4,37 +4,43 @@
     <meta charset="UTF-8">
     <title>工具窗口</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-    <link rel="stylesheet" href="../css/style.css">
+    <link rel="stylesheet" href="../css/style.css"> <style>
+        /* 确保工具内容占满窗口 */
+        html, body, #app-body, .secret-window-container, .secret-content {
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .secret-content {
+            padding: 0; /* 工具自己来控制内边距 */
+        }
+    </style>
 </head>
-<body id="app-body" class="tool-window-body">
+<body id="app-body" class="tool-window-body"> <div id="background-layer"></div>
     
-    <div class="app-glass-frame">
+    <div class="secret-window-container">
         
-        <div class="glass-title-bar">
-            <div class="window-status-dot active"></div>
-            
-            <span id="window-title" class="glass-title-text">加载中...</span>
-            
-            <div class="window-controls island-controls">
-                <button id="minimize-btn" class="control-pill" title="最小化">
-                    <div class="icon-line"></div>
+        <div class="title-bar" style="border-bottom: 1px solid var(--border-color); flex-shrink: 0;">
+             <span id="window-title" style="margin-left: 12px; font-weight: 600; -webkit-app-region: drag; flex-grow: 1;">正在加载工具...</span>
+            <div class="window-controls">
+                <button id="minimize-btn" class="window-control-btn" title="最小化">
+                    <i class="fas fa-window-minimize"></i>
                 </button>
-                <button id="maximize-btn" class="control-pill" title="最大化/还原">
-                    <div class="icon-rect"></div>
+                <button id="maximize-btn" class="window-control-btn" title="最大化">
+                    <i class="fas fa-window-maximize"></i>
                 </button>
-                <button id="close-btn" class="control-pill close" title="关闭">
+                <button id="close-btn" class="window-control-btn" title="关闭">
                     <i class="fas fa-times"></i>
                 </button>
             </div>
         </div>
 
-        <div id="tool-content-area" class="secret-content" style="flex-grow: 1; overflow: hidden; display: flex; flex-direction: column;">
+        <div id="tool-content-area" class="secret-content" style="flex-grow: 1; min-height: 0;">
             <div class="loading-container">
-                <img src="../assets/loading.gif" alt="加载中..." class="loading-gif">
-                <p id="tool-loading-text" class="loading-text">正在初始化灵动岛...</p> 
+                <img src="../assets/loading.gif" alt="加载中..." class="loading-gif"> <p class="loading-text">正在初始化工具模块...</p>
             </div>
         </div>
-        
     </div>
 
     <div id="toast-container"></div>
@@ -43,70 +49,27 @@
         import configManager from '../js/configManager.js';
         import uiManager from '../js/uiManager.js';
         import { loadToolFromUrl } from '../js/view-loader.js';
-        import i18n from '../js/i18n.js';
         
-        window.uiManager = uiManager; 
-        window.configManager = configManager;
+        // 1. 初始化窗口 (主题, 通知, 窗口控制)
+        window.uiManager = uiManager; // 将 uiManager 暴露给工具
+        window.configManager = configManager; // 将 configManager 暴露给工具
         
-        // 初始化主题
         const params = new URLSearchParams(window.location.search);
         const theme = params.get('theme') || 'dark';
         document.body.setAttribute('data-theme', theme);
         
-        async function start() {
-            try {
-                // 加载语言配置
-                const langConfig = await window.electronAPI.getLanguageConfig();
-                i18n.init(langConfig.pack, langConfig.fallback);
-                window.i18n = i18n;
-                
-                const loadingText = document.getElementById('tool-loading-text');
-                if(loadingText) loadingText.textContent = i18n.t('common.loading.tool');
-            } catch (e) {
-                console.warn('语言加载失败，使用默认配置');
-                i18n.init(null, {});
-            }
-            
-            // 绑定窗口控制事件
-            document.getElementById('close-btn').addEventListener('click', () => window.electronAPI.closeCurrentWindow());
-            document.getElementById('minimize-btn').addEventListener('click', () => window.electronAPI.secretWindowMinimize());
-            document.getElementById('maximize-btn').addEventListener('click', () => window.electronAPI.secretWindowMaximize());
+        // 绑定窗口控制
+        document.getElementById('close-btn').addEventListener('click', () => window.electronAPI.closeCurrentWindow());
+        document.getElementById('minimize-btn').addEventListener('click', () => window.electronAPI.secretWindowMinimize());
+        document.getElementById('maximize-btn').addEventListener('click', () => window.electronAPI.secretWindowMaximize());
 
-            // 加载具体工具
-            loadToolFromUrl();
+        // 2. 加载工具
+        loadToolFromUrl();
 
-            // [新增] 焦点追踪：实现窗口激活时的“呼吸发光”效果
-            const updateFocus = (isFocused) => {
-                const frame = document.querySelector('.app-glass-frame');
-                const dot = document.querySelector('.window-status-dot');
-                if (isFocused) {
-                    frame.classList.add('focused');
-                    dot.classList.add('active'); // 激活时亮绿灯
-                } else {
-                    frame.classList.remove('focused');
-                    dot.classList.remove('active'); // 失焦时变暗
-                }
-            };
-
-            window.addEventListener('focus', () => updateFocus(true));
-            window.addEventListener('blur', () => updateFocus(false));
-            
-            // 默认初始状态为激活
-            updateFocus(true);
-        }
-        
-        start();
-        
-        // 全局点击监听，处理自定义下拉菜单的关闭逻辑
-        document.addEventListener('click', (e) => {
-            document.querySelectorAll('.custom-select-options.dynamic-active').forEach(openDropdown => {
-                const wrapperId = openDropdown.id.replace('dd-options-', 'dd-wrapper-');
-                const trigger = document.getElementById(wrapperId);
-                if (openDropdown && !openDropdown.contains(e.target) && trigger && !trigger.contains(e.target)) {
-                    openDropdown.classList.remove('dynamic-active');
-                }
-            });
-        }, true);
+        // 3. [新增] 窗口焦点追踪，用于 UI 区分
+        window.addEventListener('focus', () => document.body.classList.add('window-focused'));
+        window.addEventListener('blur', () => document.body.classList.remove('window-focused'));
+        document.body.classList.add('window-focused'); // 默认加载时为激活状态
     </script>
 </body>
 </html>

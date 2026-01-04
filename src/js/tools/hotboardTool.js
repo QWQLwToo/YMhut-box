@@ -61,18 +61,6 @@ class HotboardTool extends BaseTool {
     }
 
     render() {
-        // [修改] 将 options 的 HTML 移出
-        const optionsHtml = `
-            <div id="hotboard-select-options" class="custom-select-options" style="max-height: 400px;">
-                ${this.platformCategories.map(category => `
-                    <div class="custom-select-group">
-                        <div class="custom-select-group-title">${category.name}</div>
-                        ${category.platforms.map(p => `<div class="custom-select-option" data-value="${p.id}">${p.name}</div>`).join('')}
-                    </div>
-                `).join('')}
-            </div>
-        `;
-
         return `
             <div class="page-container" style="display: flex; flex-direction: column; height: 100%;">
                 <div class="content-area" style="padding: 20px; flex-grow: 1; display: flex; flex-direction: column; gap: 20px; overflow-y: hidden;">
@@ -86,7 +74,15 @@ class HotboardTool extends BaseTool {
                                     <span>哔哩哔哩</span>
                                     <i class="fas fa-chevron-down custom-select-arrow"></i>
                                 </div>
+                                <div id="hotboard-select-options" class="custom-select-options" style="max-height: 400px;">
+                                    ${this.platformCategories.map(category => `
+                                        <div class="custom-select-group">
+                                            <div class="custom-select-group-title">${category.name}</div>
+                                            ${category.platforms.map(p => `<div class="custom-select-option" data-value="${p.id}">${p.name}</div>`).join('')}
+                                        </div>
+                                    `).join('')}
                                 </div>
+                            </div>
 
                             <button id="hotboard-query-btn" class="action-btn ripple" style="flex-grow: 1;"><i class="fas fa-sync-alt"></i> 刷新</button>
                         </div>
@@ -100,7 +96,7 @@ class HotboardTool extends BaseTool {
                     </div>
                 </div>
             </div>
-            ${optionsHtml} `;
+        `;
     }
 
     init() {
@@ -113,50 +109,15 @@ class HotboardTool extends BaseTool {
             selectWrapper: document.getElementById('hotboard-select-wrapper'),
             selectTrigger: document.getElementById('hotboard-select-trigger'),
             selectOptionsContainer: document.getElementById('hotboard-select-options'),
-            selectOptions: document.querySelectorAll('#hotboard-select-options .custom-select-option') // [修改] 确保选择器正确
+            selectOptions: document.querySelectorAll('.custom-select-option')
         };
-        
-        // [新增] 将 options 元素传送到 body，防止被裁剪
-        if (this.dom.selectOptionsContainer) {
-            document.body.appendChild(this.dom.selectOptionsContainer);
-        }
 
         this.dom.queryBtn.addEventListener('click', this._handleQuery.bind(this));
 
-        // [修改] 替换为新的、可感知边界的下拉菜单逻辑
+        // 自定义下拉菜单 JS 逻辑
         this.dom.selectTrigger.addEventListener('click', (e) => {
             e.stopPropagation();
-            
-            // 关闭所有其他打开的下拉菜单
-            document.querySelectorAll('.custom-select-options.dynamic-active').forEach(openDropdown => {
-                if (openDropdown !== this.dom.selectOptionsContainer) {
-                    openDropdown.classList.remove('dynamic-active');
-                }
-            });
-
-            // 计算位置
-            const rect = this.dom.selectTrigger.getBoundingClientRect();
-            const optionsEl = this.dom.selectOptionsContainer;
-            const optionsHeight = optionsEl.offsetHeight;
-            const windowHeight = window.innerHeight;
-
-            if (rect.bottom + optionsHeight + 5 > windowHeight && rect.top > optionsHeight + 5) {
-                // 向上
-                optionsEl.style.top = `${rect.top - optionsHeight - 5}px`;
-                optionsEl.style.bottom = 'auto';
-                optionsEl.style.transformOrigin = 'bottom center';
-            } else {
-                // 向下
-                optionsEl.style.top = `${rect.bottom + 5}px`;
-                optionsEl.style.bottom = 'auto';
-                optionsEl.style.transformOrigin = 'top center';
-            }
-            
-            optionsEl.style.left = `${rect.left}px`;
-            optionsEl.style.width = `${rect.width}px`;
-            
-            // 切换当前
-            optionsEl.classList.toggle('dynamic-active');
+            this.dom.selectWrapper.classList.toggle('active');
         });
 
         this.dom.selectOptions.forEach(option => {
@@ -164,15 +125,20 @@ class HotboardTool extends BaseTool {
                 this.dom.selectTrigger.querySelector('span').textContent = option.textContent;
                 this.dom.selectTrigger.dataset.value = option.dataset.value;
                 
-                // [修改] 现在使用 .dynamic-active
-                this.dom.selectOptionsContainer.classList.remove('dynamic-active');
+                // [BUG 修复]
+                // 新增下面这行代码来关闭下拉菜单
+                this.dom.selectWrapper.classList.remove('active');
                 
                 this._handleQuery(); // 选择后立即查询
             });
         });
 
-        // [修改] 全局点击监听器现在由 mainPage.js 或 view-tool.html 统一处理
-        
+        document.addEventListener('click', (e) => {
+            if (this.dom.selectWrapper && !this.dom.selectWrapper.contains(e.target)) {
+                this.dom.selectWrapper.classList.remove('active');
+            }
+        });
+
         // 默认加载一次 B站
         this._handleQuery();
     }
@@ -245,14 +211,14 @@ class HotboardTool extends BaseTool {
         const tableRows = data.list.map(item => {
             const rank = item.index;
             const title = item.title;
-            // [安全修复] 确保 URL 是字符串
-            let searchUrl = item.url || ''; 
+            const searchUrl = item.url;
             const hotValue = item.hot_value ? parseFloat(item.hot_value) : 0;
             
+            // 格式化热度值
             let formattedHotValue = hotValue;
-            if (hotValue > 1000000) {
+            if (hotValue > 1000000) { // 大于 100 万
                 formattedHotValue = (hotValue / 10000).toFixed(1) + 'w';
-            } else if (hotValue > 1000) {
+            } else if (hotValue > 1000) { // 大于 1000
                 formattedHotValue = (hotValue / 1000).toFixed(1) + 'k';
             }
 
@@ -261,22 +227,23 @@ class HotboardTool extends BaseTool {
                 rankClass = `rank-top-3 rank-${rank}`;
             }
 
+            // 处理 extra 标签 (如 '新', '爆')
             let extraTag = '';
             let tagText = item.extra?.tag || (typeof item.extra === 'string' ? item.extra : null);
             if (tagText) {
+                 // API 返回的标签可能包含“热”、“新”等，样式化
                  const tagClass = (tagText === '爆' || tagText === '热') ? 'hotboard-tag tag-hot' : 'hotboard-tag tag-new';
                  extraTag = `<span class="${tagClass}">${tagText}</span>`;
             }
 
-            // [重要] 将 URL 放在行元素 data-link 上，方便整行点击
-            // [UI] 移除 a 标签，改用 span，防止样式冲突，由 JS 统一处理跳转
+            // [UI 重构] 使用新的三栏布局
             return `
-                <tr data-link="${searchUrl}">
+                <tr>
                     <td style="width: 50px; text-align: center;">
-                        <span class="hotboard-rank ${rankClass}">${rank}</span>
+                        <span class="bili-hot-rank ${rankClass}">${rank}</span>
                     </td>
                     <td>
-                        <span class="hotboard-title-link">${title}</span>
+                        <a href="#" data-link="${searchUrl}" class="hotboard-title-link">${title}</a>
                         ${extraTag}
                     </td>
                     <td style="width: 100px; text-align: right;">
@@ -286,6 +253,7 @@ class HotboardTool extends BaseTool {
             `;
         }).join('');
 
+        // [UI 重构] 使用 ip-comparison-table 样式（带边框），并添加 thead
         this.dom.resultsContainer.innerHTML = `
             <table class="ip-comparison-table hotboard-table" style="animation: contentFadeIn 0.5s;">
                 <thead>
@@ -300,19 +268,10 @@ class HotboardTool extends BaseTool {
                 </tbody>
             </table>`;
             
-        // [修复逻辑] 绑定整行点击事件
-        this.dom.resultsContainer.querySelectorAll('tr[data-link]').forEach(row => {
-            row.addEventListener('click', (e) => {
+        this.dom.resultsContainer.querySelectorAll('a[data-link]').forEach(link => {
+            link.addEventListener('click', (e) => {
                 e.preventDefault();
-                const url = row.dataset.link;
-                
-                // [安全校验] 只有合法的 HTTP/HTTPS 链接才打开浏览器
-                if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
-                    window.electronAPI.openExternalLink(url);
-                } else {
-                    this._notify('无法打开', '该条目没有有效的跳转链接', 'info');
-                    console.warn('无效链接阻止打开:', url);
-                }
+                window.electronAPI.openExternalLink(e.currentTarget.dataset.link);
             });
         });
     }
@@ -321,10 +280,6 @@ class HotboardTool extends BaseTool {
         if (this.abortController) {
             this.abortController.abort();
         }
-        
-        // [新增] 移除传送到 body 的元素
-        document.getElementById('hotboard-select-options')?.remove();
-
         this._log('工具已销毁');
         super.destroy();
     }

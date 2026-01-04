@@ -13,65 +13,50 @@
     <div id="background-layer"></div>
 
     <nav class="navbar">
-        <div id="nav-active-slider" class="nav-slider-pill"></div>
-        <button id="home-btn" class="nav-btn active" title="主页"><i class="fas fa-home"></i></button>
-        <button id="toolbox-btn" class="nav-btn" title="工具箱"><i class="fas fa-toolbox"></i></button>
-        <button id="log-btn" class="nav-btn" title="日志"><i class="fas fa-history"></i></button>
-        <button id="settings-btn" class="nav-btn" title="设置"><i class="fas fa-cog"></i></button>
+        <button id="home-btn" class="nav-btn active" title="主页">
+            <i class="fas fa-home"></i>
+        </button>
+        <button id="toolbox-btn" class="nav-btn" title="工具箱">
+            <i class="fas fa-toolbox"></i>
+        </button>
+        <button id="log-btn" class="nav-btn" title="日志">
+            <i class="fas fa-history"></i>
+        </button>
+        <button id="settings-btn" class="nav-btn" title="设置">
+            <i class="fas fa-cog"></i>
+        </button>
         <div class="nav-spacer"></div>
-        <button id="theme-toggle" class="nav-btn" title="切换主题"><i class="fas fa-sun"></i></button>
-        <div id="network-status" class="network-status online" title="网络状态"><i class="fas fa-wifi"></i></div>
-        <div id="network-speed" class="network-speed" title="实时下载速度"></div>
+        <button id="theme-toggle" class="nav-btn" title="切换主题">
+            <i class="fas fa-sun"></i>
+        </button>
+        <div id="network-status" class="network-status online" title="网络状态">
+            <i class="fas fa-wifi"></i>
+        </div>
+        <div id="network-speed" class="network-speed" title="实时下载速度">
+             </div>
     </nav>
 
     <div class="main-content">
         <div class="title-bar">
-            <div class="title-bar-right-container">
-                
-                <div id="title-weather-widget" class="weather-widget-pill">
-                    <div class="css-weather-icon" id="tw-icon">
-                        <div class="css-icon-cloud"></div>
-                    </div>
-                    <span class="weather-pill-location" id="tw-location">定位中</span>
-                    <span class="weather-pill-temp" id="tw-temp">--°</span>
-                    
-                    <div class="weather-dropdown-card">
-                        <div class="wd-header">
-                            <span class="wd-city" id="tw-card-city">定位中...</span>
-                            <span class="wd-date" id="tw-date">--/--</span>
-                        </div>
-                        <div class="wd-temp-row">
-                            <div class="wd-big-temp" id="tw-big-temp">--°</div>
-                            <div class="wd-detail">
-                                <span id="tw-weather">获取中</span>
-                                <span id="tw-wind" style="font-size: 11px; opacity: 0.8;">--</span>
-                            </div>
-                        </div>
-                        <div class="wd-grid">
-                            <div class="wd-grid-item"><i class="fas fa-tint"></i> <span id="tw-humidity">--%</span></div>
-                            <div class="wd-grid-item"><i class="fas fa-leaf"></i> <span id="tw-air">--</span></div>
-                        </div>
-                        <div class="wd-hint">
-                            <span>更多的信息</span> <i class="fas fa-chevron-right" style="font-size: 10px;"></i>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="window-controls">
-                    <button id="minimize-btn" class="window-control-btn" title="最小化"><i class="fas fa-window-minimize"></i></button>
-                    <button id="maximize-btn" class="window-control-btn" title="最大化"><i class="fas fa-window-maximize"></i></button>
-                    <button id="close-btn" class="window-control-btn" title="关闭"><i class="fas fa-times"></i></button>
-                </div>
+            <div class="window-controls">
+                <button id="minimize-btn" class="window-control-btn" title="最小化">
+                    <i class="fas fa-window-minimize"></i>
+                </button>
+                <button id="maximize-btn" class="window-control-btn" title="最大化">
+                    <i class="fas fa-window-maximize"></i>
+                </button>
+                <button id="close-btn" class="window-control-btn" title="关闭">
+                    <i class="fas fa-times"></i>
+                </button>
             </div>
         </div>
 
-        <div id="content-area" class="content-area"></div>
+        <div id="content-area" class="content-area">
+            </div>
     </div>
 
     <div id="toast-container"></div>
-    <div id="weather-widget-modal" class="modal-overlay"></div>
 
-    <script defer src="https://umami.ymhut.cn/script.js" data-website-id="f39709cd-75ba-4678-85fc-091b3d27aef5"></script>
     <script type="module" src="./js/mainPage.js"></script>
     <script src="./js/ban_F12.js"></script>
 </body>
