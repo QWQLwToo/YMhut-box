@@ -55,7 +55,7 @@
 
 ### **1\. 克隆项目**
 
-git clone \[https://github.com/QWQLwToo/YMhut-box.git\](https://github.com/QWQLwToo/YMhut-box.git)  
+```git clone \[https://github.com/QWQLwToo/YMhut-box.git\](https://github.com/QWQLwToo/YMhut-box.git)  ```
 cd box
 
 ### **2\. 安装依赖**
