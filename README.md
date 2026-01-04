@@ -145,6 +145,5 @@ YMhut Box 支持远程控制能力，您可以在服务器端部署以下 JSON �
 * [Better-Sqlite3](https://github.com/WiseLibs/better-sqlite3) (Database)  
 * [Cropper.js](https://github.com/fengyuanchen/cropperjs) (Image Editing)
 
-\<p align="center"\>  
-Designed with ❤️ by \<strong\>YMHUT\</strong\>  
-\</p\>
+
+Designed with ❤️ by YMHUT
